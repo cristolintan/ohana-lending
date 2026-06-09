@@ -57,6 +57,66 @@ function saveDb(db) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(db)); } catch (e) { console.error(e); }
 }
 
+// ─── Supabase data layer ──────────────────────────────────────────────────────
+const SUPABASE_URL = "https://hjlibhrxyfipsajcywzj.supabase.co";
+const SUPABASE_KEY = "sb_publishable_6mSMEHYq3OrTl-sXlys_IQ_IDtmiFBo"; // publishable — safe with RLS
+const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+
+// Ensure an (anonymous) session exists so RLS policies (auth.uid()) resolve.
+async function ensureSession() {
+  if (!sb) throw new Error("Supabase library not loaded.");
+  const { data } = await sb.auth.getSession();
+  if (!data.session) { const { error } = await sb.auth.signInAnonymously(); if (error) throw error; }
+}
+
+// Row → app-shape mappers (snake_case DB ↔ camelCase app)
+const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r.amount, terms: r.terms,
+  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at });
+const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
+const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
+
+// Async CRUD — the React layer will use these instead of loadDb/saveDb.
+const api = {
+  async fetchAll() {
+    const [L, P, T, A, S] = await Promise.all([
+      sb.from("loans").select("*").order("ref"),
+      sb.from("payments").select("*"),
+      sb.from("transactions").select("*"),
+      sb.from("agreements").select("*"),
+      sb.from("settings").select("*").maybeSingle(),
+    ]);
+    for (const r of [L, P, T, A, S]) if (r.error) throw r.error;
+    const ag = Object.fromEntries((A.data || []).map(a => [a.loan_id, a.data]));
+    return {
+      loans: (L.data || []).map(r => ({ ...rowToLoan(r), agreement: ag[r.id] })),
+      payments: (P.data || []).map(rowToPay),
+      transactions: (T.data || []).map(rowToTx),
+      settings: { openingBalance: +((S.data && S.data.opening_balance) || 0) },
+    };
+  },
+  async createLoan(l) {
+    const { data, error } = await sb.from("loans").insert({ ref: l.ref, borrower: l.borrower, amount: l.amount,
+      terms: l.terms, flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate }).select().single();
+    if (error) throw error; return rowToLoan(data);
+  },
+  async updateLoan(id, l) {
+    const { error } = await sb.from("loans").update({ borrower: l.borrower, amount: l.amount, terms: l.terms,
+      flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate }).eq("id", id);
+    if (error) throw error;
+  },
+  async deleteLoan(id) { const { error } = await sb.from("loans").delete().eq("id", id); if (error) throw error; },
+  async addPayment(p) { const { error } = await sb.from("payments").insert({ loan_id: p.loanId, date: p.date, amount: p.amount, type: p.type }); if (error) throw error; },
+  async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
+  async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
+  async delTx(id) { const { error } = await sb.from("transactions").delete().eq("id", id); if (error) throw error; },
+  async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
+  async setOpening(v) {
+    const { data: u } = await sb.auth.getUser();
+    const { error } = await sb.from("settings").upsert({ user_id: u.user.id, opening_balance: v });
+    if (error) throw error;
+  },
+};
+
 // ─── Finance logic ───────────────────────────────────────────────────────────
 function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }) {
   const pAmt = Number(amount) || 0, n = Math.max(0, Math.floor(Number(terms) || 0));
