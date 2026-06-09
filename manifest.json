@@ -2,7 +2,7 @@
   "name": "Ohana Lending Corporation",
   "short_name": "OHANA",
   "description": "Loan Manager · Records · Payments",
-  "start_url": "/",
+  "start_url": "/ohana-lending/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#f8fafc",
