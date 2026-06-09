@@ -173,14 +173,10 @@ function App() {
   const calc = useMemo(() => computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }), [amount, terms, flatRate, frequency, startDate, dropRate]);
 
   const saveLoan = () => {
-    const borrower = name.trim();
-    if (!borrower) { flash("Enter the borrower's name."); return; }
     if (!(Number(amount) > 0) || !(Number(terms) > 0)) { flash("Enter valid amount and terms."); return; }
-    const hasActive = db.loans.some(l => l.borrower.toLowerCase() === borrower.toLowerCase() && computeStatus(l, db.payments).overallStatus !== "FULLY PAID");
-    if (hasActive) { flash(`${borrower} already has an active loan.`); return; }
     const nums = db.loans.map(l => parseInt(l.id.split("-")[1], 10)).filter(x => !isNaN(x));
     const id = "OL-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
-    const loan = { id, borrower, amount: Number(amount), terms: Math.floor(Number(terms)), flatRate: Number(flatRate), frequency, startDate, createdAt: Date.now() };
+    const loan = { id, borrower: name.trim() || "Unnamed", amount: Number(amount), terms: Math.floor(Number(terms)), flatRate: Number(flatRate), frequency, startDate, createdAt: Date.now() };
     persist({ ...db, loans: [...db.loans, loan] });
     flash(`Saved ${id} — ${loan.borrower}`);
     setTab("records");
@@ -233,7 +229,7 @@ function App() {
         <div className="flex items-center gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center font-bold text-sm">OL</div>
           <div>
-            <p className="font-bold text-sm leading-tight">OHANA LENDING CORP.</p>
+            <p className="font-bold text-sm leading-tight">Ohana Lending</p>
             <p className="text-emerald-200 text-xs">Offline · {db.loans.length} loans</p>
           </div>
         </div>
@@ -366,18 +362,16 @@ function App() {
         {tab === "status" && (<>
           <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
             <p className="font-bold text-slate-700">Find Loan</p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className={labelCls}>Borrower</label>
-                <select className={inputCls} value={selBorrower} onChange={e => { setSelBorrower(e.target.value); setLoanIdOvr(""); }}>
-                  <option value="">— select —</option>
-                  {borrowers.map(b => <option key={b}>{b}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className={labelCls}>Or Loan ID</label>
-                <input className={inputCls} value={loanIdOvr} onChange={e => setLoanIdOvr(e.target.value)} placeholder="OL-0001" />
-              </div>
+            <div>
+              <label className={labelCls}>Borrower</label>
+              <select className={inputCls} value={selBorrower} onChange={e => { setSelBorrower(e.target.value); setLoanIdOvr(""); }}>
+                <option value="">— select —</option>
+                {borrowers.map(b => <option key={b}>{b}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Or Loan ID</label>
+              <input className={inputCls} value={loanIdOvr} onChange={e => setLoanIdOvr(e.target.value)} placeholder="OL-0001" />
             </div>
           </div>
 
@@ -394,7 +388,12 @@ function App() {
               <Badge s={statusData.overallStatus} />
             </div>
 
-           
+            <div className="grid grid-cols-2 gap-3">
+              <Stat label="Total Interest" value={fmt(statusData.summedInterest)} tone="amber" />
+              <Stat label="Total Due" value={fmt(resolved.loan.amount + statusData.summedInterest)} tone="slate" />
+              <Stat label="Total Paid" value={fmt(statusData.totalLogged)} tone="emerald" />
+              <Stat label="Balance Left" value={fmt(statusData.grandLeft)} tone="teal" />
+            </div>
 
             {/* Log Payment */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
@@ -417,20 +416,7 @@ function App() {
               </div>
               <button onClick={addPayment} className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm">Add Payment</button>
 
-              {loanPayments.length > 0 && (
-                <div className="space-y-1.5 pt-1">
-                  {loanPayments.map(p => (
-                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
-                      <span className="font-semibold">{fmt(p.amount)}</span>
-                      <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
-                      <button onClick={() => persist({ ...db, payments: db.payments.filter(x => x.id !== p.id) })} className="text-red-400 pl-2 text-base leading-none">×</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Schedule */}
+                {/* Schedule */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <p className="px-4 py-3 font-bold text-slate-700 border-b border-slate-100">Schedule & Status</p>
               <div className="overflow-x-auto">
@@ -439,10 +425,8 @@ function App() {
                     {["#","Principal","Interest","Total","Due","Status","Left"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
                   </tr></thead>
                   <tbody>
-                    {statusData.rows.map((r, i) => {
-                      const overdue = r.status !== "PAID" && r.due < parseDate(today());
-                      return (
-                      <tr key={i} className={overdue ? "bg-red-100" : r.isExt ? "bg-amber-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
+                    {statusData.rows.map((r, i) => (
+                      <tr key={i} className={r.isExt ? "bg-amber-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
                         <td className="px-3 py-2 font-medium">{r.period}</td>
                         <td className="px-3 py-2 text-teal-700">{fmt(r.principal)}</td>
                         <td className="px-3 py-2 text-amber-600">{fmt(r.interest)}</td>
@@ -451,8 +435,7 @@ function App() {
                         <td className="px-3 py-2"><Badge s={r.status} /></td>
                         <td className="px-3 py-2">{fmt(r.amtLeft)}</td>
                       </tr>
-                      );
-                    })}
+                    ))}
                     <tr className="bg-emerald-50 border-t-2 border-emerald-200 font-bold text-xs">
                       <td className="px-3 py-2">Total</td>
                       <td className="px-3 py-2 text-teal-700">{fmt(resolved.loan.amount)}</td>
@@ -467,12 +450,20 @@ function App() {
               </div>
             </div>
 
-             <div className="grid grid-cols-2 gap-3">
-              <Stat label="Total Interest" value={fmt(statusData.summedInterest)} tone="amber" />
-              <Stat label="Total Due" value={fmt(resolved.loan.amount + statusData.summedInterest)} tone="slate" />
-              <Stat label="Total Paid" value={fmt(statusData.totalLogged)} tone="emerald" />
-              <Stat label="Balance Left" value={fmt(statusData.grandLeft)} tone="teal" />
+              {loanPayments.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  {loanPayments.map(p => (
+                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+                      <span className="font-semibold">{fmt(p.amount)}</span>
+                      <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
+                      <button onClick={() => persist({ ...db, payments: db.payments.filter(x => x.id !== p.id) })} className="text-red-400 pl-2 text-base leading-none">×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
+
+          
           </>)}
         </>)}
       </main>
