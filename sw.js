@@ -1,12 +1,16 @@
-const CACHE = "ohana-v6";
+// sw.js — Ohana Lending PWA service worker
+// Relative asset paths so it works whether the app is served from "/"
+// (local dev) or a subpath like "/ohana-lending/" (GitHub Pages).
+const CACHE = "ohana-v9";
+
 const ASSETS = [
-  "/",
-  "/index.html",
-  "/app.js",
-  "/manifest.json",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  // CDN deps cached on first load
+  "./",
+  "./index.html",
+  "./app.js",
+  "./manifest.json",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png",
+  // CDN deps (versioned URLs → safe to cache-first forever)
   "https://cdn.tailwindcss.com",
   "https://unpkg.com/react@18/umd/react.production.min.js",
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
@@ -16,35 +20,52 @@ const ASSETS = [
   "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"
 ];
 
-// Install: cache everything
+// Install: pre-cache the app shell, then take over immediately.
 self.addEventListener("install", e => {
-  e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())
-  );
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
 
-// Activate: remove old caches
+// Activate: remove old caches.
 self.addEventListener("activate", e => {
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
 });
 
-// Fetch: cache-first strategy (works fully offline)
+// Fetch strategy:
+//   • Navigations & app code (index.html / app.js) → network-first:
+//     always get the latest when online, fall back to cache when offline.
+//     (No more manual cache-busting for code changes.)
+//   • Everything else (CDN libs, icons) → cache-first: fast and stable.
 self.addEventListener("fetch", e => {
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(res => {
-        // Cache new successful responses
-        if (res && res.status === 200 && res.type !== "opaque") {
+  const req = e.request;
+  if (req.method !== "GET") return; // never cache non-GET requests
+
+  const url = new URL(req.url);
+  const isAppCode = url.origin === self.location.origin && /\/(index\.html|app\.js)?$/.test(url.pathname);
+
+  if (req.mode === "navigate" || isAppCode) {
+    e.respondWith(
+      fetch(req)
+        .then(res => {
           const clone = res.clone();
-          caches.open(CACHE).then(c => c.put(e.request, clone));
-        }
-        return res;
-      }).catch(() => caches.match("/index.html")); // fallback
-    })
+          caches.open(CACHE).then(c => c.put(req, clone));
+          return res;
+        })
+        .catch(() => caches.match(req).then(hit => hit || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  e.respondWith(
+    caches.match(req).then(hit => hit || fetch(req).then(res => {
+      if (res && res.status === 200 && res.type !== "opaque") {
+        const clone = res.clone();
+        caches.open(CACHE).then(c => c.put(req, clone));
+      }
+      return res;
+    }))
   );
 });
