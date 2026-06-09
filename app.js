@@ -83,7 +83,7 @@ const api = {
       sb.from("payments").select("*"),
       sb.from("transactions").select("*"),
       sb.from("agreements").select("*"),
-      sb.from("settings").select("*").maybeSingle(),
+      sb.from("settings").select("*").limit(1).maybeSingle(),
     ]);
     for (const r of [L, P, T, A, S]) if (r.error) throw r.error;
     const ag = Object.fromEntries((A.data || []).map(a => [a.loan_id, a.data]));
@@ -111,9 +111,16 @@ const api = {
   async delTx(id) { const { error } = await sb.from("transactions").delete().eq("id", id); if (error) throw error; },
   async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
   async setOpening(v) {
-    const { data: u } = await sb.auth.getUser();
-    const { error } = await sb.from("settings").upsert({ user_id: u.user.id, opening_balance: v });
-    if (error) throw error;
+    // Singleton shared settings row: update the existing one, else create it.
+    const { data: existing } = await sb.from("settings").select("user_id").limit(1).maybeSingle();
+    if (existing) {
+      const { error } = await sb.from("settings").update({ opening_balance: v }).eq("user_id", existing.user_id);
+      if (error) throw error;
+    } else {
+      const { data: u } = await sb.auth.getUser();
+      const { error } = await sb.from("settings").upsert({ user_id: u.user.id, opening_balance: v });
+      if (error) throw error;
+    }
   },
 };
 
@@ -450,7 +457,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
         pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
         heightLeft -= pageH;
       }
-      pdf.save(`Loan Agreement - ${loan.borrower} (${loan.id}).pdf`);
+      pdf.save(`Loan Agreement - ${loan.borrower} (${loan.ref || loan.id}).pdf`);
     } catch (err) {
       console.error(err);
       alert("Could not generate the PDF. Try the Print button instead.");
@@ -498,7 +505,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
       </div>
 
       <div className="no-print bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
-        <p className="font-bold text-slate-700">Agreement Details · {loan.id}</p>
+        <p className="font-bold text-slate-700">Agreement Details · {loan.ref || loan.id}</p>
         <div>
           <label className={labelCls}>Agreement Date</label>
           <input type="date" className={inputCls} value={f.agreementDate} onChange={e => set("agreementDate", e.target.value)} />
@@ -618,7 +625,8 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
-  const [db, setDb] = useState(() => loadDb());
+  const [db, setDb] = useState({ loans: [], payments: [], transactions: [], settings: {} });
+  const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("new");
   const [currency, setCurrency] = useState("PHP");
   const [toast, setToast] = useState("");
@@ -650,8 +658,20 @@ function App() {
   const [payType, setPayType] = useState("Standard");
   const [payDate, setPayDate] = useState(today());
 
-  const persist = useCallback(next => { setDb(next); saveDb(next); }, []);
   const flash = msg => { setToast(msg); setTimeout(() => setToast(""), 2500); };
+  const refresh = useCallback(async () => { const data = await api.fetchAll(); setDb(data); return data; }, []);
+
+  // Initial load: ensure a (silent anonymous) session for the DB role, then fetch
+  // the shared data. Records are visible to every device; user_id is still stamped
+  // server-side so per-user accounts can be switched on later.
+  useEffect(() => {
+    if (!sb) { setLoading(false); flash("Supabase failed to load."); return; }
+    (async () => {
+      try { await ensureSession(); const data = await refresh(); setOpeningInput(String(data.settings.openingBalance || "")); }
+      catch (e) { console.error(e); flash("Could not connect to the database."); }
+      finally { setLoading(false); }
+    })();
+  }, [refresh]);
 
   const sym = currency === "PHP" ? "₱" : "$";
   const fmt = v => sym + Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -672,7 +692,7 @@ function App() {
     setTab("new");
   };
 
-  const saveLoan = () => {
+  const saveLoan = async () => {
     const borrower = name.trim();
     const amt = Number(amount), trm = Math.floor(Number(terms)), rate = Number(flatRate), drop = Number(dropRate);
     if (!borrower) { flash("Enter the borrower's name."); return; }
@@ -683,25 +703,50 @@ function App() {
     if (!startDate) { flash("Pick a start date."); return; }
     const hasActive = db.loans.some(l => l.id !== editId && l.borrower.toLowerCase() === borrower.toLowerCase() && computeStatus(l, db.payments).overallStatus !== "FULLY PAID");
     if (hasActive) { flash(`${borrower} already has an active loan.`); return; }
-    if (editId) {
-      const loans = db.loans.map(l => l.id === editId ? { ...l, borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate } : l);
-      persist({ ...db, loans });
-      flash(`Updated ${editId} — ${borrower}`);
-    } else {
-      const nums = db.loans.map(l => parseInt(l.id.split("-")[1], 10)).filter(x => !isNaN(x));
-      const id = "OL-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
-      const loan = { id, borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate, createdAt: Date.now() };
-      persist({ ...db, loans: [...db.loans, loan] });
-      flash(`Saved ${id} — ${borrower}`);
-    }
-    resetForm();
-    setTab("records");
+    try {
+      if (editId) {
+        await api.updateLoan(editId, { borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate });
+        flash(`Updated — ${borrower}`);
+      } else {
+        const nums = db.loans.map(l => parseInt((l.ref || "").split("-")[1], 10)).filter(x => !isNaN(x));
+        const ref = "OL-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
+        await api.createLoan({ ref, borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate });
+        flash(`Saved ${ref} — ${borrower}`);
+      }
+      await refresh();
+      resetForm();
+      setTab("records");
+    } catch (e) { console.error(e); flash("Save failed — check connection."); }
   };
 
-  const deleteLoan = id => {
-    if (!confirm(`Delete loan ${id}? This also removes all its payments.`)) return;
-    persist({ ...db, loans: db.loans.filter(l => l.id !== id), payments: db.payments.filter(p => p.loanId !== id) });
-    flash(`Deleted ${id}`);
+  const deleteLoan = async (id, ref) => {
+    if (!confirm(`Delete loan ${ref || id}? This also removes all its payments.`)) return;
+    try { await api.deleteLoan(id); await refresh(); flash(`Deleted ${ref || ""}`.trim()); }
+    catch (e) { console.error(e); flash("Delete failed — check connection."); }
+  };
+
+  // One-time migration of any pre-Supabase localStorage data into the cloud.
+  const localBackup = (() => { try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); } catch { return {}; } })();
+  const canImport = !localStorage.getItem("ohana_pwa_db_migrated") && (localBackup.loans || []).length > 0;
+  const importLocal = async () => {
+    const loans = localBackup.loans || [];
+    if (!confirm(`Import ${loans.length} loan(s) and their payments from this device into the cloud?`)) return;
+    try {
+      await ensureSession();
+      const idMap = {};
+      for (const l of loans) {
+        const created = await api.createLoan({ ref: l.id, borrower: l.borrower, amount: l.amount, terms: l.terms,
+          flatRate: l.flatRate, dropRate: l.dropRate != null ? l.dropRate : l.flatRate, frequency: l.frequency, startDate: l.startDate });
+        idMap[l.id] = created.id;
+        if (l.agreement) await api.saveAgreement(created.id, l.agreement);
+      }
+      for (const p of (localBackup.payments || [])) if (idMap[p.loanId]) await api.addPayment({ loanId: idMap[p.loanId], date: p.date, amount: p.amount, type: p.type });
+      for (const t of (localBackup.transactions || [])) await api.addTx({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note });
+      if (localBackup.settings && localBackup.settings.openingBalance) await api.setOpening(localBackup.settings.openingBalance);
+      localStorage.setItem("ohana_pwa_db_migrated", "1");
+      await refresh();
+      flash(`Imported ${loans.length} loan(s).`);
+    } catch (e) { console.error(e); flash("Import failed — check connection."); }
   };
 
   const borrowers = useMemo(() => [...new Set(db.loans.map(l => l.borrower))], [db.loans]);
@@ -736,10 +781,10 @@ function App() {
     const todayStr = iso(new Date()), curMonth = todayStr.slice(0, 7);
 
     // Actual cash events: disbursements (out), collections (in), manual entries (in/out).
-    const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
+    const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
     const coll = db.payments.map(p => {
       const loan = db.loans.find(l => l.id === p.loanId);
-      return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
+      return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, ref: loan ? loan.ref : "", borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
     });
     const manual = (db.transactions || []).map(t => ({
       id: "M-" + t.id, date: t.date, kind: t.kind, subtype: "", note: t.note, loanId: null, borrower: "",
@@ -757,7 +802,7 @@ function App() {
         computeStatus(l, db.payments).rows.forEach((r, idx) => {
           const dueISO = iso(r.due);
           if (dueISO >= todayStr && r.status !== "PAID" && r.amtLeft > 0.005)
-            projected.push({ id: `X-${l.id}-${idx}`, date: dueISO, kind: "Scheduled Due", subtype: "", loanId: l.id, borrower: l.borrower, inflow: r.amtLeft, outflow: 0, projected: true });
+            projected.push({ id: `X-${l.id}-${idx}`, date: dueISO, kind: "Scheduled Due", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: r.amtLeft, outflow: 0, projected: true });
         });
       });
       projected.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
@@ -806,7 +851,7 @@ function App() {
     const esc = v => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const header = ["Date", "Type", "Detail", "Loan ID", "Borrower", "Inflow", "Outflow", "Balance"];
     const rows = cashflow.ledger.slice().reverse().map(t =>
-      [t.date, t.kind, t.subtype, t.loanId, t.borrower, t.inflow, t.outflow, t.balance].map(esc).join(","));
+      [t.date, t.kind, t.subtype, t.ref || "", t.borrower, t.inflow, t.outflow, t.balance].map(esc).join(","));
     const csv = [header.join(","), ...rows].join("\r\n");
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -817,27 +862,30 @@ function App() {
     flash("Exported CSV");
   };
 
-  const addTransaction = () => {
+  const addTransaction = async () => {
     const amt = Number(txAmount);
     if (!(amt > 0)) { flash("Enter an amount greater than 0."); return; }
     if (!txDate) { flash("Pick a date."); return; }
-    const tx = { id: Date.now(), date: txDate, kind: txCat, direction: txDir(txCat), amount: amt, note: txNote.trim() };
-    persist({ ...db, transactions: [...(db.transactions || []), tx] });
-    setTxAmount(""); setTxNote("");
-    flash("Entry added.");
+    try {
+      await api.addTx({ date: txDate, kind: txCat, direction: txDir(txCat), amount: amt, note: txNote.trim() });
+      await refresh();
+      setTxAmount(""); setTxNote("");
+      flash("Entry added.");
+    } catch (e) { console.error(e); flash("Save failed — check connection."); }
   };
-  const deleteTransaction = id => persist({ ...db, transactions: (db.transactions || []).filter(t => t.id !== id) });
-  const commitOpening = () => persist({ ...db, settings: { ...(db.settings || {}), openingBalance: Number(openingInput) || 0 } });
+  const deleteTransaction = async id => { try { await api.delTx(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
+  const commitOpening = async () => { try { await api.setOpening(Number(openingInput) || 0); await refresh(); } catch (e) { console.error(e); flash("Could not save opening balance."); } };
 
   const agreementLoan = useMemo(() => db.loans.find(l => l.id === agreementLoanId), [db.loans, agreementLoanId]);
-  const saveAgreement = data => {
-    persist({ ...db, loans: db.loans.map(l => l.id === agreementLoanId ? { ...l, agreement: data } : l) });
-    flash("Agreement saved.");
+  const saveAgreement = async data => {
+    try { await api.saveAgreement(agreementLoanId, data); await refresh(); flash("Agreement saved."); }
+    catch (e) { console.error(e); flash("Could not save agreement — check connection."); }
   };
 
   const resolved = useMemo(() => {
     if (loanIdOvr.trim()) {
-      const loan = db.loans.find(l => l.id.toLowerCase() === loanIdOvr.trim().toLowerCase());
+      const q = loanIdOvr.trim();
+      const loan = db.loans.find(l => l.id === q || (l.ref && l.ref.toLowerCase() === q.toLowerCase()));
       return loan ? { loan } : { error: "Loan not found." };
     }
     if (selBorrower) {
@@ -849,18 +897,22 @@ function App() {
 
   const statusData = useMemo(() => resolved.loan ? computeStatus(resolved.loan, db.payments) : null, [resolved, db.payments]);
 
-  const addPayment = () => {
+  const addPayment = async () => {
     if (!resolved.loan) return;
-    if (!(Number(payAmount) > 0)) { flash("Enter a payment amount."); return; }
+    const amt = Number(payAmount);
+    if (!(amt > 0)) { flash("Enter a payment amount."); return; }
     if (!payDate) { flash("Pick a payment date."); return; }
     if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
-    const p = { id: Date.now(), loanId: resolved.loan.id, date: payDate, amount: Number(payAmount), type: payType };
-    persist({ ...db, payments: [...db.payments, p] });
-    setPayAmount("");
-    const over = statusData ? Number(payAmount) - statusData.grandLeft : 0;
-    if (over > 0.005) flash(`⚠ Logged ${fmt(p.amount)} — exceeds balance by ${fmt(over)}`);
-    else flash(`Logged ${fmt(p.amount)}`);
+    try {
+      await api.addPayment({ loanId: resolved.loan.id, date: payDate, amount: amt, type: payType });
+      await refresh();
+      setPayAmount("");
+      const over = statusData ? amt - statusData.grandLeft : 0;
+      if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
+      else flash(`Logged ${fmt(amt)}`);
+    } catch (e) { console.error(e); flash("Save failed — check connection."); }
   };
+  const deletePayment = async id => { try { await api.delPayment(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
 
   const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
 
@@ -886,7 +938,7 @@ function App() {
           <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center font-bold text-sm">OLC</div>
           <div>
             <p className="font-bold text-sm leading-tight">JAVILAT LENDING CORPORATION</p>
-            <p className="text-emerald-200 text-xs">Offline · {db.loans.length} loans</p>
+            <p className="text-emerald-200 text-xs">{loading ? "Connecting…" : `☁ ${db.loans.length} loans`}</p>
           </div>
         </div>
         <select className="px-2.5 py-1.5 rounded-lg text-slate-800 text-sm bg-white" value={currency} onChange={e => setCurrency(e.target.value)}>
@@ -995,6 +1047,7 @@ function App() {
               <p className="font-bold text-slate-700">{db.loans.length} Loan{db.loans.length !== 1 ? "s" : ""}</p>
               <button onClick={() => setTab("new")} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New</button>
             </div>
+            {canImport && <button onClick={importLocal} className="w-full py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-xs font-semibold active:bg-amber-100 transition">⤓ Import {localBackup.loans.length} loan(s) saved on this device</button>}
             {db.loans.length > 0 && (
               <div className="grid grid-cols-2 gap-3">
                 <Stat label="Outstanding" value={fmt(portfolio.outstanding)} tone="amber" />
@@ -1027,7 +1080,7 @@ function App() {
                 <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-2 animate-fade-up">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <p className="text-xs text-emerald-600 font-semibold">{l.id}</p>
+                      <p className="text-xs text-emerald-600 font-semibold">{l.ref || l.id}</p>
                       <p className="font-bold">{l.borrower}</p>
                       <p className="text-xs text-slate-500">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
                     </div>
@@ -1044,7 +1097,7 @@ function App() {
                   <div className="flex gap-2 pt-1">
                     <button onClick={() => { setLoanIdOvr(l.id); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">View Payments</button>
                     {s.overallStatus !== "FULLY PAID" && <button onClick={() => editLoan(l)} className="px-4 py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Edit</button>}
-                    <button onClick={() => deleteLoan(l.id)} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Delete</button>
+                    <button onClick={() => deleteLoan(l.id, l.ref)} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Delete</button>
                   </div>
                   <button onClick={() => { setAgreementLoanId(l.id); setTab("agreement"); }} className="w-full py-2.5 rounded-xl border border-emerald-300 active:bg-emerald-50 text-emerald-700 text-sm font-semibold transition">📄 Loan Agreement</button>
                 </div>
@@ -1076,7 +1129,7 @@ function App() {
           {resolved.loan && statusData && (<>
             <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex items-center justify-between gap-2">
               <div>
-                <p className="text-xs text-emerald-600 font-semibold">{resolved.loan.id}</p>
+                <p className="text-xs text-emerald-600 font-semibold">{resolved.loan.ref || resolved.loan.id}</p>
                 <p className="font-bold">{resolved.loan.borrower}</p>
                 <p className="text-xs text-slate-500">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
               </div>
@@ -1146,7 +1199,7 @@ function App() {
                     <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
                       <span className="font-semibold">{fmt(p.amount)}</span>
                       <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
-                      <button onClick={() => persist({ ...db, payments: db.payments.filter(x => x.id !== p.id) })} className="text-red-400 pl-2 text-base leading-none">×</button>
+                      <button onClick={() => deletePayment(p.id)} className="text-red-400 pl-2 text-base leading-none">×</button>
                     </div>
                   ))}
                 </div>
@@ -1272,7 +1325,7 @@ function App() {
                             {t.kind}{t.kind === "Collection" && t.subtype ? ` · ${t.subtype}` : ""}
                             {t.projected && <span className="px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-500 text-[10px] font-semibold">Projected</span>}
                           </div>
-                          <div className="text-slate-400">{t.loanId ? `${t.loanId} · ${t.borrower}` : (t.note || "Manual entry")}</div>
+                          <div className="text-slate-400">{t.loanId ? `${t.ref || ""} · ${t.borrower}` : (t.note || "Manual entry")}</div>
                         </td>
                         <td className="px-3 py-2 text-emerald-700 whitespace-nowrap">{t.inflow ? fmt(t.inflow) : "—"}</td>
                         <td className="px-3 py-2 text-amber-700 whitespace-nowrap">{t.outflow ? fmt(t.outflow) : "—"}</td>
