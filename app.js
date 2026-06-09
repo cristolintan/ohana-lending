@@ -664,18 +664,16 @@ function App() {
         {tab === "status" && (<>
           <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
             <p className="font-bold text-slate-700">Find Loan</p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className={labelCls}>Borrower</label>
-                <select className={inputCls} value={selBorrower} onChange={e => { setSelBorrower(e.target.value); setLoanIdOvr(""); }}>
-                  <option value="">— select —</option>
-                  {borrowers.map(b => <option key={b}>{b}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className={labelCls}>Or Loan ID</label>
-                <input className={inputCls} value={loanIdOvr} onChange={e => setLoanIdOvr(e.target.value)} placeholder="OL-0001" />
-              </div>
+            <div>
+              <label className={labelCls}>Borrower</label>
+              <select className={inputCls} value={selBorrower} onChange={e => { setSelBorrower(e.target.value); setLoanIdOvr(""); }}>
+                <option value="">— select —</option>
+                {borrowers.map(b => <option key={b}>{b}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Or Loan ID</label>
+              <input className={inputCls} value={loanIdOvr} onChange={e => setLoanIdOvr(e.target.value)} placeholder="OL-0001" />
             </div>
           </div>
 
@@ -692,7 +690,12 @@ function App() {
               <Badge s={statusData.overallStatus} />
             </div>
 
-           
+            <div className="grid grid-cols-2 gap-3">
+              <Stat label="Total Interest" value={fmt(statusData.summedInterest)} tone="amber" />
+              <Stat label="Total Due" value={fmt(resolved.loan.amount + statusData.summedInterest)} tone="slate" />
+              <Stat label="Total Paid" value={fmt(statusData.totalLogged)} tone="emerald" />
+              <Stat label="Balance Left" value={fmt(statusData.grandLeft)} tone="teal" />
+            </div>
 
            
 
@@ -705,10 +708,8 @@ function App() {
                     {["#","Principal","Interest","Total","Due","Status","Left"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
                   </tr></thead>
                   <tbody>
-                    {statusData.rows.map((r, i) => {
-                      const overdue = r.status !== "PAID" && r.due < parseDate(today());
-                      return (
-                      <tr key={i} className={overdue ? "bg-red-100" : r.isExt ? "bg-amber-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
+                    {statusData.rows.map((r, i) => (
+                      <tr key={i} className={r.isExt ? "bg-amber-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
                         <td className="px-3 py-2 font-medium">{r.period}</td>
                         <td className="px-3 py-2 text-teal-700">{fmt(r.principal)}</td>
                         <td className="px-3 py-2 text-amber-600">{fmt(r.interest)}</td>
@@ -717,8 +718,7 @@ function App() {
                         <td className="px-3 py-2"><Badge s={r.status} /></td>
                         <td className="px-3 py-2">{fmt(r.amtLeft)}</td>
                       </tr>
-                      );
-                    })}
+                    ))}
                     <tr className="bg-emerald-50 border-t-2 border-emerald-200 font-bold text-xs">
                       <td className="px-3 py-2">Total</td>
                       <td className="px-3 py-2 text-teal-700">{fmt(resolved.loan.amount)}</td>
@@ -773,6 +773,8 @@ function App() {
               <Stat label="Total Paid" value={fmt(statusData.totalLogged)} tone="emerald" />
               <Stat label="Balance Left" value={fmt(statusData.grandLeft)} tone="teal" />
             </div>
+
+          
           </>)}
         </>)}
 
