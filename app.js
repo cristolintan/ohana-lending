@@ -157,7 +157,7 @@ function Badge({ s }) {
 function Toast({ msg }) {
   if (!msg) return null;
   return (
-    <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white text-sm px-4 py-2.5 rounded-xl shadow-xl flex items-center gap-2 whitespace-nowrap">
+    <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white text-sm px-4 py-2.5 rounded-xl shadow-xl flex items-center gap-2 whitespace-nowrap animate-slide-up">
       <span className="text-emerald-400">✓</span> {msg}
     </div>
   );
@@ -192,8 +192,8 @@ function SignatureModal({ label, initial, onCancel, onSave }) {
   const clear = () => { const c = canvasRef.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); hasInk.current = false; };
 
   return (
-    <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-4 space-y-3">
+    <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 animate-fade-in">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-4 space-y-3 animate-scale-in">
         <p className="font-bold text-slate-700">{label}</p>
         <canvas ref={canvasRef} width={600} height={250}
           className="w-full rounded-xl border border-slate-300 bg-white touch-none cursor-crosshair"
@@ -585,6 +585,12 @@ function App() {
 
   const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
 
+  // Reset scroll to top whenever the tab changes (better mobile flow)
+  const mainRef = useRef(null);
+  useEffect(() => { if (mainRef.current) mainRef.current.scrollTop = 0; }, [tab]);
+  // Keep Lucide icons rendered across tab switches / re-renders
+  useEffect(() => { if (window.lucide) lucide.createIcons(); });
+
   // ── Bottom nav ──
   const navItems = [
     { id: "new",     label: "New Loan",  icon: "calculator" },
@@ -603,14 +609,15 @@ function App() {
             <p className="text-emerald-200 text-xs">Offline · {db.loans.length} loans</p>
           </div>
         </div>
-        <select className="px-2 py-1 rounded-lg text-slate-800 text-sm bg-white" value={currency} onChange={e => setCurrency(e.target.value)}>
+        <select className="px-2.5 py-1.5 rounded-lg text-slate-800 text-sm bg-white" value={currency} onChange={e => setCurrency(e.target.value)}>
           <option value="PHP">₱ Peso</option>
           <option value="USD">$ Dollar</option>
         </select>
       </header>
 
       {/* Body */}
-      <main className="flex-1 overflow-y-auto scroll-ios px-4 py-4 pb-24 space-y-4">
+      <main ref={mainRef} className="flex-1 overflow-y-auto scroll-ios px-4 py-4 pb-24 space-y-4">
+        <div key={tab} className="space-y-4 animate-fade-in">
 
         {/* ── NEW LOAN ── */}
         {tab === "new" && (<>
@@ -623,19 +630,19 @@ function App() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={labelCls}>Amount</label>
-                <input type="number" className={inputCls} value={amount} onChange={e => setAmount(e.target.value)} />
+                <input type="number" inputMode="decimal" className={inputCls} value={amount} onChange={e => setAmount(e.target.value)} />
               </div>
               <div>
                 <label className={labelCls}>Terms</label>
-                <input type="number" className={inputCls} value={terms} onChange={e => setTerms(e.target.value)} />
+                <input type="number" inputMode="numeric" className={inputCls} value={terms} onChange={e => setTerms(e.target.value)} />
               </div>
               <div>
                 <label className={labelCls}>Flat Rate %</label>
-                <input type="number" step="0.1" className={inputCls} value={flatRate} onChange={e => setFlatRate(e.target.value)} />
+                <input type="number" inputMode="decimal" step="0.1" className={inputCls} value={flatRate} onChange={e => setFlatRate(e.target.value)} />
               </div>
               <div>
                 <label className={labelCls}>Decline Rate %</label>
-                <input type="number" step="0.1" className={inputCls} value={dropRate} onChange={e => setDropRate(e.target.value)} />
+                <input type="number" inputMode="decimal" step="0.1" className={inputCls} value={dropRate} onChange={e => setDropRate(e.target.value)} />
               </div>
             </div>
             <div>
@@ -649,8 +656,8 @@ function App() {
               <input type="date" className={inputCls} value={startDate} onChange={e => setStartDate(e.target.value)} />
             </div>
             <div className="flex gap-2 pt-1">
-              <button onClick={saveLoan} className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm">{editId ? "Update Loan" : "Save Loan"}</button>
-              <button onClick={resetForm} className="px-4 py-3 rounded-xl border border-slate-300 text-slate-600 text-sm font-medium">{editId ? "Cancel" : "Reset"}</button>
+              <button onClick={saveLoan} className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm transition">{editId ? "Update Loan" : "Save Loan"}</button>
+              <button onClick={resetForm} className="px-4 py-3 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-medium transition">{editId ? "Cancel" : "Reset"}</button>
             </div>
           </div>
 
@@ -698,7 +705,7 @@ function App() {
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="font-bold text-slate-700">{db.loans.length} Loan{db.loans.length !== 1 ? "s" : ""}</p>
-              <button onClick={() => setTab("new")} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold">+ New</button>
+              <button onClick={() => setTab("new")} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New</button>
             </div>
             {db.loans.length > 0 && (
               <div className="grid grid-cols-2 gap-3">
@@ -708,12 +715,17 @@ function App() {
                 <Stat label="Overdue Loans" value={portfolio.overdue} tone={portfolio.overdue > 0 ? "red" : "slate"} />
               </div>
             )}
-            {db.loans.length === 0 && <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-slate-400">No loans yet.</div>}
-            {db.loans.map(l => {
+            {db.loans.length === 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-3">
+                <p className="text-slate-400 text-sm">No loans yet.</p>
+                <button onClick={() => setTab("new")} className="px-4 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ Create your first loan</button>
+              </div>
+            )}
+            {db.loans.map((l, i) => {
               const s = computeStatus(l, db.payments);
               const isOverdue = s.rows.some(r => r.status !== "PAID" && r.due < parseDate(today()));
               return (
-                <div key={l.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-2">
+                <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-2 animate-fade-up">
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <p className="text-xs text-emerald-600 font-semibold">{l.id}</p>
@@ -731,11 +743,11 @@ function App() {
                     <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
                   </div>
                   <div className="flex gap-2 pt-1">
-                    <button onClick={() => { setLoanIdOvr(l.id); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold">View Payments</button>
-                    {s.overallStatus !== "FULLY PAID" && <button onClick={() => editLoan(l)} className="px-4 py-2 rounded-xl border border-slate-300 text-slate-600 text-xs font-semibold">Edit</button>}
-                    <button onClick={() => deleteLoan(l.id)} className="px-4 py-2 rounded-xl border border-red-200 text-red-500 text-xs font-semibold">Delete</button>
+                    <button onClick={() => { setLoanIdOvr(l.id); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">View Payments</button>
+                    {s.overallStatus !== "FULLY PAID" && <button onClick={() => editLoan(l)} className="px-4 py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Edit</button>}
+                    <button onClick={() => deleteLoan(l.id)} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Delete</button>
                   </div>
-                  <button onClick={() => { setAgreementLoanId(l.id); setTab("agreement"); }} className="w-full py-2 rounded-xl border border-emerald-300 text-emerald-700 text-xs font-semibold">📄 Loan Agreement</button>
+                  <button onClick={() => { setAgreementLoanId(l.id); setTab("agreement"); }} className="w-full py-2.5 rounded-xl border border-emerald-300 active:bg-emerald-50 text-emerald-700 text-sm font-semibold transition">📄 Loan Agreement</button>
                 </div>
               );
             })}
@@ -744,8 +756,8 @@ function App() {
 
         {/* ── STATUS ── */}
         {tab === "status" && (<>
-          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
-            <p className="font-bold text-slate-700">Find Loan</p>
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 grid grid-cols-2 gap-3 shadow-sm">
+            <p className="col-span-2 font-bold text-slate-700">Find Loan</p>
             <div>
               <label className={labelCls}>Borrower</label>
               <select className={inputCls} value={selBorrower} onChange={e => { setSelBorrower(e.target.value); setLoanIdOvr(""); }}>
@@ -770,13 +782,6 @@ function App() {
                 <p className="text-xs text-slate-500">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
               </div>
               <Badge s={statusData.overallStatus} />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <Stat label="Total Interest" value={fmt(statusData.summedInterest)} tone="amber" />
-              <Stat label="Total Due" value={fmt(resolved.loan.amount + statusData.summedInterest)} tone="slate" />
-              <Stat label="Total Paid" value={fmt(statusData.totalLogged)} tone="emerald" />
-              <Stat label="Balance Left" value={fmt(statusData.grandLeft)} tone="teal" />
             </div>
 
            
@@ -821,7 +826,7 @@ function App() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelCls}>Amount</label>
-                  <input type="number" className={inputCls} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
+                  <input type="number" inputMode="decimal" className={inputCls} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
                 </div>
                 <div>
                   <label className={labelCls}>Type</label>
@@ -864,12 +869,13 @@ function App() {
         {tab === "agreement" && (agreementLoan
           ? <AgreementView loan={agreementLoan} fmt={fmt} onBack={() => setTab("records")} onSave={saveAgreement} />
           : <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400 text-sm">Loan not found. <button onClick={() => setTab("records")} className="text-emerald-600 font-semibold underline">Back to records</button></div>)}
+        </div>
       </main>
 
       {/* Bottom Tab Bar (iOS-style) */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur border-t border-slate-200 flex z-20" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
         {navItems.map(({ id, label, icon }) => (
-          <button key={id} onClick={() => setTab(id)} className={`flex-1 flex flex-col items-center py-2.5 gap-0.5 text-xs font-medium transition-colors ${tab === id ? "text-emerald-600" : "text-slate-400"}`}>
+          <button key={id} onClick={() => setTab(id)} className={`flex-1 flex flex-col items-center py-3 gap-0.5 text-xs font-medium transition-colors active:bg-slate-100 ${tab === id ? "text-emerald-600" : "text-slate-400"}`}>
             <i data-lucide={icon} className="w-5 h-5" style={{ strokeWidth: tab === id ? 2.5 : 1.8 }}></i>
             {label}
           </button>

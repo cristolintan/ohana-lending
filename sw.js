@@ -1,4 +1,4 @@
-const CACHE = "ohana-v3";
+const CACHE = "ohana-v5";
 const ASSETS = [
   "/",
   "/index.html",
