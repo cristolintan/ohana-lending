@@ -190,6 +190,64 @@ function Toast({ msg }) {
   );
 }
 
+// ─── Lightweight inline-SVG charts (no dependency, print- and offline-friendly) ─
+function MiniBars({ data, fmt }) {
+  if (!data.length) return <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>;
+  const max = Math.max(1, ...data.map(d => Math.max(d.inflow, d.outflow)));
+  const groupW = 52, barW = 18, gap = 6, h = 130, pad = 6, labelH = 22;
+  const W = data.length * groupW;
+  return (
+    <div className="overflow-x-auto px-4 pb-3">
+      <svg width={W} height={h + labelH} className="block">
+        {data.map((d, i) => {
+          const gx = i * groupW + (groupW - (barW * 2 + gap)) / 2;
+          const inH = (d.inflow / max) * h, outH = (d.outflow / max) * h;
+          return (
+            <g key={d.key}>
+              <rect x={gx} y={pad + h - inH} width={barW} height={Math.max(0, inH)} rx="2" fill="#10b981">
+                <title>{d.label} · In {fmt(d.inflow)}</title>
+              </rect>
+              <rect x={gx + barW + gap} y={pad + h - outH} width={barW} height={Math.max(0, outH)} rx="2" fill="#fbbf24">
+                <title>{d.label} · Out {fmt(d.outflow)}</title>
+              </rect>
+              <text x={i * groupW + groupW / 2} y={h + labelH - 6} textAnchor="middle" fontSize="9" fill="#94a3b8">{d.label}</text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function MiniLine({ data, fmt }) {
+  if (!data.length) return <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>;
+  const W = 320, H = 140, pad = 10;
+  const vals = data.map(d => d.netBalance);
+  const min = Math.min(0, ...vals), max = Math.max(0, ...vals), range = (max - min) || 1;
+  const n = data.length;
+  const X = i => n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad);
+  const Y = v => pad + (1 - (v - min) / range) * (H - 2 * pad);
+  const line = data.map((d, i) => `${X(i).toFixed(1)},${Y(d.netBalance).toFixed(1)}`).join(" ");
+  const area = `${X(0).toFixed(1)},${(H - pad).toFixed(1)} ${line} ${X(n - 1).toFixed(1)},${(H - pad).toFixed(1)}`;
+  const zeroY = Y(0);
+  return (
+    <div className="px-4 pb-3 pt-2">
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" className="block">
+        <polygon points={area} fill="#10b98122" />
+        {min < 0 && <line x1="0" y1={zeroY} x2={W} y2={zeroY} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="4 3" />}
+        <polyline points={line} fill="none" stroke="#059669" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        {data.map((d, i) => (
+          <circle key={d.key} cx={X(i)} cy={Y(d.netBalance)} r="2.5" fill="#059669"><title>{d.label}: {fmt(d.netBalance)}</title></circle>
+        ))}
+      </svg>
+      <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+        <span>{data[0].label}</span>
+        <span>{data[n - 1].label}</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── Signature capture (draw in a popup or upload an image) ───────────────────
 function SignatureModal({ label, initial, onCancel, onSave }) {
   const canvasRef = useRef(null);
@@ -608,8 +666,37 @@ function App() {
       .reverse(); // newest first for display
     const interest = db.loans.reduce((sum, l) =>
       sum + realizedInterestUpTo(l, db.payments, end, true) - realizedInterestUpTo(l, db.payments, start, false), 0);
-    return { collected, disbursed, net: collected - disbursed, interest, ledger };
+    // Monthly buckets for the charts (chronological; netBalance = running position at month end)
+    const mMap = {};
+    inRange.forEach(t => {
+      const key = t.date.slice(0, 7);
+      if (!mMap[key]) {
+        const [y, m] = key.split("-");
+        const label = new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short" }) + " " + y.slice(2);
+        mMap[key] = { key, label, inflow: 0, outflow: 0, netBalance: t.balance };
+      }
+      mMap[key].inflow += t.inflow;
+      mMap[key].outflow += t.outflow;
+      mMap[key].netBalance = t.balance;
+    });
+    const months = Object.values(mMap).sort((a, b) => a.key < b.key ? -1 : 1);
+    return { collected, disbursed, net: collected - disbursed, interest, ledger, months };
   }, [db.loans, db.payments, cfRange, cfDir]);
+
+  const exportCsv = () => {
+    const esc = v => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const header = ["Date", "Type", "Detail", "Loan ID", "Borrower", "Inflow", "Outflow", "Balance"];
+    const rows = cashflow.ledger.slice().reverse().map(t =>
+      [t.date, t.kind, t.subtype, t.loanId, t.borrower, t.inflow, t.outflow, t.balance].map(esc).join(","));
+    const csv = [header.join(","), ...rows].join("\r\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `cash-flow-${cfRange}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    flash("Exported CSV");
+  };
 
   const agreementLoan = useMemo(() => db.loans.find(l => l.id === agreementLoanId), [db.loans, agreementLoanId]);
   const saveAgreement = data => {
@@ -970,7 +1057,33 @@ function App() {
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <p className="px-4 py-3 font-bold text-slate-700 border-b border-slate-100">Ledger</p>
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <p className="font-bold text-slate-700">Inflow vs Outflow</p>
+              <div className="flex gap-3 text-xs text-slate-500">
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#10b981" }} />In</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#fbbf24" }} />Out</span>
+              </div>
+            </div>
+            <MiniBars data={cashflow.months} fmt={fmt} />
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <p className="font-bold text-slate-700">Net Cash Position</p>
+              {cashflow.months.length > 0 && (
+                <span className={`font-bold text-sm ${cashflow.months[cashflow.months.length - 1].netBalance < 0 ? "text-red-600" : "text-emerald-700"}`}>
+                  {fmt(cashflow.months[cashflow.months.length - 1].netBalance)}
+                </span>
+              )}
+            </div>
+            <MiniLine data={cashflow.months} fmt={fmt} />
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <p className="font-bold text-slate-700">Ledger</p>
+              {cashflow.ledger.length > 0 && <button onClick={exportCsv} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold active:bg-slate-100 transition">⬇ CSV</button>}
+            </div>
             {cashflow.ledger.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-sm">No cash flow activity in this range.</div>
             ) : (
