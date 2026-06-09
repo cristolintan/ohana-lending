@@ -233,7 +233,7 @@ function App() {
         <div className="flex items-center gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center font-bold text-sm">OL</div>
           <div>
-            <p className="font-bold text-sm leading-tight">Ohana Lending</p>
+            <p className="font-bold text-sm leading-tight">OHANA LENDING CORP.</p>
             <p className="text-emerald-200 text-xs">Offline · {db.loans.length} loans</p>
           </div>
         </div>
