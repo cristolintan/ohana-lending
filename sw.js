@@ -1,7 +1,7 @@
 // sw.js — Ohana Lending PWA service worker
 // Relative asset paths so it works whether the app is served from "/"
 // (local dev) or a subpath like "/ohana-lending/" (GitHub Pages).
-const CACHE = "ohana-v9";
+const CACHE = "ohana-v10";
 
 const ASSETS = [
   "./",
@@ -17,7 +17,8 @@ const ASSETS = [
   "https://unpkg.com/@babel/standalone/babel.min.js",
   "https://unpkg.com/lucide@latest/dist/umd/lucide.min.js",
   "https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js",
-  "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"
+  "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js",
+  "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"
 ];
 
 // Install: pre-cache the app shell, then take over immediately.
@@ -44,6 +45,7 @@ self.addEventListener("fetch", e => {
   if (req.method !== "GET") return; // never cache non-GET requests
 
   const url = new URL(req.url);
+  if (url.hostname.endsWith("supabase.co")) return;   // API/auth/storage: always network, never cache
   const isAppCode = url.origin === self.location.origin && /\/(index\.html|app\.js)?$/.test(url.pathname);
 
   if (req.mode === "navigate" || isAppCode) {

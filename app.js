@@ -49,12 +49,73 @@ function pesoWords(n) {
 // ─── Storage (localStorage) ──────────────────────────────────────────────────
 const LS_KEY = "ohana_pwa_db";
 function loadDb() {
-  try { const v = localStorage.getItem(LS_KEY); return v ? JSON.parse(v) : { loans: [], payments: [] }; }
-  catch { return { loans: [], payments: [] }; }
+  const empty = { loans: [], payments: [], transactions: [], settings: {} };
+  try { const v = localStorage.getItem(LS_KEY); return v ? { ...empty, ...JSON.parse(v) } : empty; }
+  catch { return empty; }
 }
 function saveDb(db) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(db)); } catch (e) { console.error(e); }
 }
+
+// ─── Supabase data layer ──────────────────────────────────────────────────────
+const SUPABASE_URL = "https://hjlibhrxyfipsajcywzj.supabase.co";
+const SUPABASE_KEY = "sb_publishable_6mSMEHYq3OrTl-sXlys_IQ_IDtmiFBo"; // publishable — safe with RLS
+const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+
+// Ensure an (anonymous) session exists so RLS policies (auth.uid()) resolve.
+async function ensureSession() {
+  if (!sb) throw new Error("Supabase library not loaded.");
+  const { data } = await sb.auth.getSession();
+  if (!data.session) { const { error } = await sb.auth.signInAnonymously(); if (error) throw error; }
+}
+
+// Row → app-shape mappers (snake_case DB ↔ camelCase app)
+const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r.amount, terms: r.terms,
+  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at });
+const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
+const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
+
+// Async CRUD — the React layer will use these instead of loadDb/saveDb.
+const api = {
+  async fetchAll() {
+    const [L, P, T, A, S] = await Promise.all([
+      sb.from("loans").select("*").order("ref"),
+      sb.from("payments").select("*"),
+      sb.from("transactions").select("*"),
+      sb.from("agreements").select("*"),
+      sb.from("settings").select("*").maybeSingle(),
+    ]);
+    for (const r of [L, P, T, A, S]) if (r.error) throw r.error;
+    const ag = Object.fromEntries((A.data || []).map(a => [a.loan_id, a.data]));
+    return {
+      loans: (L.data || []).map(r => ({ ...rowToLoan(r), agreement: ag[r.id] })),
+      payments: (P.data || []).map(rowToPay),
+      transactions: (T.data || []).map(rowToTx),
+      settings: { openingBalance: +((S.data && S.data.opening_balance) || 0) },
+    };
+  },
+  async createLoan(l) {
+    const { data, error } = await sb.from("loans").insert({ ref: l.ref, borrower: l.borrower, amount: l.amount,
+      terms: l.terms, flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate }).select().single();
+    if (error) throw error; return rowToLoan(data);
+  },
+  async updateLoan(id, l) {
+    const { error } = await sb.from("loans").update({ borrower: l.borrower, amount: l.amount, terms: l.terms,
+      flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate }).eq("id", id);
+    if (error) throw error;
+  },
+  async deleteLoan(id) { const { error } = await sb.from("loans").delete().eq("id", id); if (error) throw error; },
+  async addPayment(p) { const { error } = await sb.from("payments").insert({ loan_id: p.loanId, date: p.date, amount: p.amount, type: p.type }); if (error) throw error; },
+  async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
+  async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
+  async delTx(id) { const { error } = await sb.from("transactions").delete().eq("id", id); if (error) throw error; },
+  async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
+  async setOpening(v) {
+    const { data: u } = await sb.auth.getUser();
+    const { error } = await sb.from("settings").upsert({ user_id: u.user.id, opening_balance: v });
+    if (error) throw error;
+  },
+};
 
 // ─── Finance logic ───────────────────────────────────────────────────────────
 function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }) {
@@ -149,6 +210,18 @@ function realizedInterestUpTo(loan, allPayments, cutoff, inclusive) {
   return interest;
 }
 
+// Manual cash-entry categories and their natural direction.
+const TX_TYPES = [
+  ["Capital Injection", "in"],
+  ["Penalty / Late Fee", "in"],
+  ["Processing Fee", "in"],
+  ["Other Income", "in"],
+  ["Operating Expense", "out"],
+  ["Withdrawal", "out"],
+  ["Other Expense", "out"]
+];
+const txDir = cat => { const f = TX_TYPES.find(t => t[0] === cat); return f ? f[1] : "in"; };
+
 // ─── Tiny components ─────────────────────────────────────────────────────────
 const inputCls = "w-full px-3 py-2.5 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none text-slate-800 bg-white text-sm";
 const labelCls = "block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wide";
@@ -193,7 +266,7 @@ function Toast({ msg }) {
 // ─── Lightweight inline-SVG charts (no dependency, print- and offline-friendly) ─
 function MiniBars({ data, fmt }) {
   if (!data.length) return <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>;
-  const max = Math.max(1, ...data.map(d => Math.max(d.inflow, d.outflow)));
+  const max = Math.max(1, ...data.map(d => Math.max(d.inflow + (d.projIn || 0), d.outflow)));
   const groupW = 52, barW = 18, gap = 6, h = 130, pad = 6, labelH = 22;
   const W = data.length * groupW;
   return (
@@ -201,16 +274,13 @@ function MiniBars({ data, fmt }) {
       <svg width={W} height={h + labelH} className="block">
         {data.map((d, i) => {
           const gx = i * groupW + (groupW - (barW * 2 + gap)) / 2;
-          const inH = (d.inflow / max) * h, outH = (d.outflow / max) * h;
+          const inH = (d.inflow / max) * h, projH = ((d.projIn || 0) / max) * h, outH = (d.outflow / max) * h;
           return (
             <g key={d.key}>
-              <rect x={gx} y={pad + h - inH} width={barW} height={Math.max(0, inH)} rx="2" fill="#10b981">
-                <title>{d.label} · In {fmt(d.inflow)}</title>
-              </rect>
-              <rect x={gx + barW + gap} y={pad + h - outH} width={barW} height={Math.max(0, outH)} rx="2" fill="#fbbf24">
-                <title>{d.label} · Out {fmt(d.outflow)}</title>
-              </rect>
-              <text x={i * groupW + groupW / 2} y={h + labelH - 6} textAnchor="middle" fontSize="9" fill="#94a3b8">{d.label}</text>
+              {inH > 0 && <rect x={gx} y={pad + h - inH} width={barW} height={inH} rx="2" fill="#10b981"><title>{d.label} · In {fmt(d.inflow)}</title></rect>}
+              {projH > 0 && <rect x={gx} y={pad + h - inH - projH} width={barW} height={projH} rx="2" fill="#6ee7b7"><title>{d.label} · Projected {fmt(d.projIn)}</title></rect>}
+              {outH > 0 && <rect x={gx + barW + gap} y={pad + h - outH} width={barW} height={outH} rx="2" fill="#fbbf24"><title>{d.label} · Out {fmt(d.outflow)}</title></rect>}
+              <text x={i * groupW + groupW / 2} y={h + labelH - 6} textAnchor="middle" fontSize="9" fill={d.projected ? "#cbd5e1" : "#94a3b8"}>{d.label}</text>
             </g>
           );
         })}
@@ -227,17 +297,22 @@ function MiniLine({ data, fmt }) {
   const n = data.length;
   const X = i => n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad);
   const Y = v => pad + (1 - (v - min) / range) * (H - 2 * pad);
-  const line = data.map((d, i) => `${X(i).toFixed(1)},${Y(d.netBalance).toFixed(1)}`).join(" ");
-  const area = `${X(0).toFixed(1)},${(H - pad).toFixed(1)} ${line} ${X(n - 1).toFixed(1)},${(H - pad).toFixed(1)}`;
+  const C = data.map((d, i) => ({ x: X(i), y: Y(d.netBalance), projected: d.projected, label: d.label, val: d.netBalance }));
+  const fp = C.findIndex(c => c.projected);
+  const solidC = fp === -1 ? C : C.slice(0, fp);
+  const dashC = fp === -1 ? [] : C.slice(Math.max(0, fp - 1));
+  const pts = arr => arr.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+  const area = `${C[0].x.toFixed(1)},${(H - pad).toFixed(1)} ${pts(C)} ${C[n - 1].x.toFixed(1)},${(H - pad).toFixed(1)}`;
   const zeroY = Y(0);
   return (
     <div className="px-4 pb-3 pt-2">
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" className="block">
         <polygon points={area} fill="#10b98122" />
         {min < 0 && <line x1="0" y1={zeroY} x2={W} y2={zeroY} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="4 3" />}
-        <polyline points={line} fill="none" stroke="#059669" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        {data.map((d, i) => (
-          <circle key={d.key} cx={X(i)} cy={Y(d.netBalance)} r="2.5" fill="#059669"><title>{d.label}: {fmt(d.netBalance)}</title></circle>
+        {solidC.length > 1 && <polyline points={pts(solidC)} fill="none" stroke="#059669" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />}
+        {dashC.length > 1 && <polyline points={pts(dashC)} fill="none" stroke="#059669" strokeWidth="2" strokeDasharray="5 4" strokeLinejoin="round" strokeLinecap="round" />}
+        {C.map((c, i) => (
+          <circle key={i} cx={c.x} cy={c.y} r="2.5" fill={c.projected ? "#6ee7b7" : "#059669"}><title>{c.label}: {fmt(c.val)}</title></circle>
         ))}
       </svg>
       <div className="flex justify-between text-[10px] text-slate-400 mt-1">
@@ -551,6 +626,12 @@ function App() {
   const [recordFilter, setRecordFilter] = useState("active");
   const [cfRange, setCfRange] = useState("all");
   const [cfDir, setCfDir] = useState("all");
+  const [cfProjected, setCfProjected] = useState(false);
+  const [txDate, setTxDate] = useState(today());
+  const [txCat, setTxCat] = useState("Capital Injection");
+  const [txAmount, setTxAmount] = useState("");
+  const [txNote, setTxNote] = useState("");
+  const [openingInput, setOpeningInput] = useState(() => String((db.settings && db.settings.openingBalance) || ""));
 
   // Calc inputs
   const [name, setName] = useState("");
@@ -619,7 +700,7 @@ function App() {
 
   const deleteLoan = id => {
     if (!confirm(`Delete loan ${id}? This also removes all its payments.`)) return;
-    persist({ loans: db.loans.filter(l => l.id !== id), payments: db.payments.filter(p => p.loanId !== id) });
+    persist({ ...db, loans: db.loans.filter(l => l.id !== id), payments: db.payments.filter(p => p.loanId !== id) });
     flash(`Deleted ${id}`);
   };
 
@@ -648,40 +729,78 @@ function App() {
   [db.loans, db.payments, recordFilter]);
 
   const cashflow = useMemo(() => {
+    const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const monthLabel = key => { const [y, m] = key.split("-"); return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short" }) + " " + y.slice(2); };
     const [start, end] = rangeBounds(cfRange);
-    // Build the full ledger (disbursements out + collections in), oldest first.
-    const out = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
-    const inn = db.payments.map(p => {
+    const opening = Number(db.settings && db.settings.openingBalance) || 0;
+    const todayStr = iso(new Date()), curMonth = todayStr.slice(0, 7);
+
+    // Actual cash events: disbursements (out), collections (in), manual entries (in/out).
+    const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
+    const coll = db.payments.map(p => {
       const loan = db.loans.find(l => l.id === p.loanId);
       return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
     });
-    const asc = [...out, ...inn].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-    let bal = 0;
-    asc.forEach(t => { bal += t.inflow - t.outflow; t.balance = bal; }); // running net cash position
-    const inRange = asc.filter(t => t.date >= start && t.date <= end);
-    const collected = inRange.reduce((s, t) => s + t.inflow, 0);
-    const disbursed = inRange.reduce((s, t) => s + t.outflow, 0);
-    const ledger = inRange
-      .filter(t => cfDir === "all" ? true : cfDir === "in" ? t.inflow > 0 : t.outflow > 0)
-      .reverse(); // newest first for display
+    const manual = (db.transactions || []).map(t => ({
+      id: "M-" + t.id, date: t.date, kind: t.kind, subtype: "", note: t.note, loanId: null, borrower: "",
+      inflow: t.direction === "in" ? Number(t.amount) || 0 : 0, outflow: t.direction === "out" ? Number(t.amount) || 0 : 0
+    }));
+    const actual = [...disb, ...coll, ...manual].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    let bal = opening;
+    actual.forEach(t => { bal += t.inflow - t.outflow; t.balance = bal; });
+    const inRange = actual.filter(t => t.date >= start && t.date <= end);
+
+    // Projected upcoming dues (only when toggled on), continuing the running balance.
+    const projected = [];
+    if (cfProjected) {
+      db.loans.forEach(l => {
+        computeStatus(l, db.payments).rows.forEach((r, idx) => {
+          const dueISO = iso(r.due);
+          if (dueISO >= todayStr && r.status !== "PAID" && r.amtLeft > 0.005)
+            projected.push({ id: `X-${l.id}-${idx}`, date: dueISO, kind: "Scheduled Due", subtype: "", loanId: l.id, borrower: l.borrower, inflow: r.amtLeft, outflow: 0, projected: true });
+        });
+      });
+      projected.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+      let pbal = bal;
+      projected.forEach(t => { pbal += t.inflow; t.balance = pbal; });
+    }
+
+    // KPIs (actuals in range).
+    const collected = inRange.filter(t => t.kind === "Collection").reduce((s, t) => s + t.inflow, 0);
+    const disbursed = inRange.filter(t => t.kind === "Disbursement").reduce((s, t) => s + t.outflow, 0);
+    const net = inRange.reduce((s, t) => s + t.inflow - t.outflow, 0);
     const interest = db.loans.reduce((sum, l) =>
       sum + realizedInterestUpTo(l, db.payments, end, true) - realizedInterestUpTo(l, db.payments, start, false), 0);
-    // Monthly buckets for the charts (chronological; netBalance = running position at month end)
+    const expected = projected.reduce((s, t) => s + t.inflow, 0);
+
+    // Ledger (newest first), respecting the direction filter.
+    const ledger = [...inRange, ...projected]
+      .filter(t => cfDir === "all" ? true : cfDir === "in" ? t.inflow > 0 : t.outflow > 0)
+      .sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+
+    // Monthly buckets for the charts.
     const mMap = {};
-    inRange.forEach(t => {
+    [...inRange, ...projected].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).forEach(t => {
       const key = t.date.slice(0, 7);
-      if (!mMap[key]) {
-        const [y, m] = key.split("-");
-        const label = new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short" }) + " " + y.slice(2);
-        mMap[key] = { key, label, inflow: 0, outflow: 0, netBalance: t.balance };
-      }
-      mMap[key].inflow += t.inflow;
-      mMap[key].outflow += t.outflow;
+      if (!mMap[key]) mMap[key] = { key, label: monthLabel(key), inflow: 0, outflow: 0, projIn: 0, netBalance: t.balance, projected: key > curMonth };
+      if (t.projected) mMap[key].projIn += t.inflow;
+      else { mMap[key].inflow += t.inflow; mMap[key].outflow += t.outflow; }
       mMap[key].netBalance = t.balance;
     });
     const months = Object.values(mMap).sort((a, b) => a.key < b.key ? -1 : 1);
-    return { collected, disbursed, net: collected - disbursed, interest, ledger, months };
-  }, [db.loans, db.payments, cfRange, cfDir]);
+
+    // Per-transaction running-balance series for the position line (a "Start"
+    // carry-in point keeps the line meaningful even within a single month).
+    const hist = [...inRange, ...projected].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    const series = [];
+    if (hist.length) {
+      const f = hist[0];
+      series.push({ netBalance: f.balance - (f.inflow - f.outflow), label: "Start", projected: false });
+      hist.forEach(t => series.push({ netBalance: t.balance, label: fmtDate(parseDate(t.date)), projected: !!t.projected }));
+    }
+
+    return { collected, disbursed, net, interest, expected, expectedCount: projected.length, ledger, months, series, opening, balance: bal };
+  }, [db.loans, db.payments, db.transactions, db.settings, cfRange, cfDir, cfProjected]);
 
   const exportCsv = () => {
     const esc = v => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -697,6 +816,18 @@ function App() {
     URL.revokeObjectURL(url);
     flash("Exported CSV");
   };
+
+  const addTransaction = () => {
+    const amt = Number(txAmount);
+    if (!(amt > 0)) { flash("Enter an amount greater than 0."); return; }
+    if (!txDate) { flash("Pick a date."); return; }
+    const tx = { id: Date.now(), date: txDate, kind: txCat, direction: txDir(txCat), amount: amt, note: txNote.trim() };
+    persist({ ...db, transactions: [...(db.transactions || []), tx] });
+    setTxAmount(""); setTxNote("");
+    flash("Entry added.");
+  };
+  const deleteTransaction = id => persist({ ...db, transactions: (db.transactions || []).filter(t => t.id !== id) });
+  const commitOpening = () => persist({ ...db, settings: { ...(db.settings || {}), openingBalance: Number(openingInput) || 0 } });
 
   const agreementLoan = useMemo(() => db.loans.find(l => l.id === agreementLoanId), [db.loans, agreementLoanId]);
   const saveAgreement = data => {
@@ -1047,6 +1178,12 @@ function App() {
                 <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfDir === k ? "bg-slate-800 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
               ))}
             </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide flex-1">Opening Balance</label>
+              <input type="number" inputMode="decimal" value={openingInput} onChange={e => setOpeningInput(e.target.value)} onBlur={commitOpening} placeholder="0.00" className="w-32 px-3 py-2 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none text-sm text-right text-slate-800 bg-white" />
+            </div>
+            <button onClick={() => setCfProjected(v => !v)} className={`w-full py-2 rounded-xl text-xs font-semibold transition ${cfProjected ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{cfProjected ? "✓ Showing projected dues" : "Show projected dues"}</button>
+            {cfProjected && <p className="text-xs text-slate-400">Expected upcoming: <span className="font-semibold text-emerald-700">{fmt(cashflow.expected)}</span> across {cashflow.expectedCount} due{cashflow.expectedCount !== 1 ? "s" : ""}.</p>}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -1070,13 +1207,47 @@ function App() {
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
               <p className="font-bold text-slate-700">Net Cash Position</p>
-              {cashflow.months.length > 0 && (
-                <span className={`font-bold text-sm ${cashflow.months[cashflow.months.length - 1].netBalance < 0 ? "text-red-600" : "text-emerald-700"}`}>
-                  {fmt(cashflow.months[cashflow.months.length - 1].netBalance)}
-                </span>
-              )}
+              <span className={`font-bold text-sm ${cashflow.balance < 0 ? "text-red-600" : "text-emerald-700"}`}>{fmt(cashflow.balance)}</span>
             </div>
-            <MiniLine data={cashflow.months} fmt={fmt} />
+            <MiniLine data={cashflow.series} fmt={fmt} />
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+            <p className="font-bold text-slate-700">Other Cash Entries</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Category</label>
+                <select className={inputCls} value={txCat} onChange={e => setTxCat(e.target.value)}>
+                  {TX_TYPES.map(([k]) => <option key={k}>{k}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Amount</label>
+                <input type="number" inputMode="decimal" className={inputCls} value={txAmount} onChange={e => setTxAmount(e.target.value)} placeholder="0.00" />
+              </div>
+              <div>
+                <label className={labelCls}>Date</label>
+                <input type="date" className={inputCls} value={txDate} onChange={e => setTxDate(e.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>Note</label>
+                <input className={inputCls} value={txNote} onChange={e => setTxNote(e.target.value)} placeholder="Optional" />
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">{txDir(txCat) === "in" ? "↑ Adds to cash (inflow)" : "↓ Reduces cash (outflow)"}</p>
+            <button onClick={addTransaction} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Add Entry</button>
+            {(db.transactions || []).filter(t => { const [s, e] = rangeBounds(cfRange); return t.date >= s && t.date <= e; }).sort((a, b) => a.date < b.date ? 1 : -1).map(t => (
+              <div key={t.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+                <div className="min-w-0">
+                  <span className={`font-semibold ${t.direction === "in" ? "text-emerald-700" : "text-amber-700"}`}>{t.direction === "in" ? "+" : "−"}{fmt(t.amount)}</span>
+                  <span className="text-slate-500"> · {t.kind}{t.note ? ` · ${t.note}` : ""}</span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-slate-400">{fmtDate(parseDate(t.date))}</span>
+                  <button onClick={() => deleteTransaction(t.id)} className="text-red-400 text-base leading-none">×</button>
+                </div>
+              </div>
+            ))}
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1094,11 +1265,14 @@ function App() {
                   </tr></thead>
                   <tbody>
                     {cashflow.ledger.map(t => (
-                      <tr key={t.id} onClick={() => { setLoanIdOvr(t.loanId); setSelBorrower(""); setTab("status"); }} className="border-t border-slate-100 active:bg-slate-50 cursor-pointer">
+                      <tr key={t.id} onClick={() => { if (t.loanId) { setLoanIdOvr(t.loanId); setSelBorrower(""); setTab("status"); } }} className={`border-t border-slate-100 ${t.loanId ? "active:bg-slate-50 cursor-pointer" : ""} ${t.projected ? "opacity-60" : ""}`}>
                         <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(parseDate(t.date))}</td>
                         <td className="px-3 py-2">
-                          <div className="font-medium text-slate-700">{t.kind}{t.subtype ? ` · ${t.subtype}` : ""}</div>
-                          <div className="text-slate-400">{t.loanId} · {t.borrower}</div>
+                          <div className="font-medium text-slate-700 flex items-center gap-1">
+                            {t.kind}{t.kind === "Collection" && t.subtype ? ` · ${t.subtype}` : ""}
+                            {t.projected && <span className="px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-500 text-[10px] font-semibold">Projected</span>}
+                          </div>
+                          <div className="text-slate-400">{t.loanId ? `${t.loanId} · ${t.borrower}` : (t.note || "Manual entry")}</div>
                         </td>
                         <td className="px-3 py-2 text-emerald-700 whitespace-nowrap">{t.inflow ? fmt(t.inflow) : "—"}</td>
                         <td className="px-3 py-2 text-amber-700 whitespace-nowrap">{t.outflow ? fmt(t.outflow) : "—"}</td>
