@@ -122,6 +122,33 @@ function computeStatus(loan, allPayments) {
   return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft === 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
+// ─── Cash flow helpers ─────────────────────────────────────────────────────────
+// Inclusive [start, end] YYYY-MM-DD bounds for a date-range preset (local time).
+function rangeBounds(preset) {
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const now = new Date(), end = iso(now);
+  if (preset === "month") return [iso(new Date(now.getFullYear(), now.getMonth(), 1)), end];
+  if (preset === "30d") { const s = new Date(now); s.setDate(s.getDate() - 29); return [iso(s), end]; }
+  if (preset === "year") return [iso(new Date(now.getFullYear(), 0, 1)), end];
+  return ["0000-01-01", "9999-12-31"]; // all time
+}
+
+// Realized interest recognized for a loan from payments up to a cutoff date.
+// Allocates payments across the amortization schedule (oldest first) and sums
+// the interest share of each covered installment.
+function realizedInterestUpTo(loan, allPayments, cutoff, inclusive) {
+  const pays = allPayments.filter(p => p.loanId === loan.id && (inclusive ? p.date <= cutoff : p.date < cutoff));
+  const st = computeStatus(loan, pays);
+  let left = st.totalLogged, interest = 0;
+  for (const r of st.rows) {
+    if (left <= 1e-9) break;
+    const applied = Math.min(left, r.total);
+    if (r.total > 0) interest += applied * (r.interest / r.total);
+    left -= applied;
+  }
+  return interest;
+}
+
 // ─── Tiny components ─────────────────────────────────────────────────────────
 const inputCls = "w-full px-3 py-2.5 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none text-slate-800 bg-white text-sm";
 const labelCls = "block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wide";
@@ -463,6 +490,9 @@ function App() {
   const [currency, setCurrency] = useState("PHP");
   const [toast, setToast] = useState("");
   const [agreementLoanId, setAgreementLoanId] = useState(null);
+  const [recordFilter, setRecordFilter] = useState("active");
+  const [cfRange, setCfRange] = useState("all");
+  const [cfDir, setCfDir] = useState("all");
 
   // Calc inputs
   const [name, setName] = useState("");
@@ -550,6 +580,37 @@ function App() {
     }, { principal: 0, outstanding: 0, collected: 0, active: 0, overdue: 0 });
   }, [db.loans, db.payments]);
 
+  const filteredLoans = useMemo(() =>
+    db.loans
+      .map(l => ({ l, s: computeStatus(l, db.payments) }))
+      .filter(({ s }) =>
+        recordFilter === "all" ? true
+        : recordFilter === "paid" ? s.overallStatus === "FULLY PAID"
+        : s.overallStatus === "ACTIVE BALANCE"),
+  [db.loans, db.payments, recordFilter]);
+
+  const cashflow = useMemo(() => {
+    const [start, end] = rangeBounds(cfRange);
+    // Build the full ledger (disbursements out + collections in), oldest first.
+    const out = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
+    const inn = db.payments.map(p => {
+      const loan = db.loans.find(l => l.id === p.loanId);
+      return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
+    });
+    const asc = [...out, ...inn].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    let bal = 0;
+    asc.forEach(t => { bal += t.inflow - t.outflow; t.balance = bal; }); // running net cash position
+    const inRange = asc.filter(t => t.date >= start && t.date <= end);
+    const collected = inRange.reduce((s, t) => s + t.inflow, 0);
+    const disbursed = inRange.reduce((s, t) => s + t.outflow, 0);
+    const ledger = inRange
+      .filter(t => cfDir === "all" ? true : cfDir === "in" ? t.inflow > 0 : t.outflow > 0)
+      .reverse(); // newest first for display
+    const interest = db.loans.reduce((sum, l) =>
+      sum + realizedInterestUpTo(l, db.payments, end, true) - realizedInterestUpTo(l, db.payments, start, false), 0);
+    return { collected, disbursed, net: collected - disbursed, interest, ledger };
+  }, [db.loans, db.payments, cfRange, cfDir]);
+
   const agreementLoan = useMemo(() => db.loans.find(l => l.id === agreementLoanId), [db.loans, agreementLoanId]);
   const saveAgreement = data => {
     persist({ ...db, loans: db.loans.map(l => l.id === agreementLoanId ? { ...l, agreement: data } : l) });
@@ -596,6 +657,7 @@ function App() {
     { id: "new",     label: "New Loan",  icon: "calculator" },
     { id: "records", label: "Records",   icon: "file-text" },
     { id: "status",  label: "Payments & Status",  icon: "wallet" },
+    { id: "cashflow", label: "Cash Flow", icon: "trending-up" },
   ];
 
   return (
@@ -723,14 +785,25 @@ function App() {
                 <Stat label="Overdue Loans" value={portfolio.overdue} tone={portfolio.overdue > 0 ? "red" : "slate"} />
               </div>
             )}
+            {db.loans.length > 0 && (
+              <div className="flex gap-2">
+                {[["active", "Active"], ["all", "All"], ["paid", "Fully Paid"]].map(([k, lbl]) => (
+                  <button key={k} onClick={() => setRecordFilter(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${recordFilter === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>
+                    {lbl} ({k === "all" ? db.loans.length : k === "active" ? portfolio.active : db.loans.length - portfolio.active})
+                  </button>
+                ))}
+              </div>
+            )}
             {db.loans.length === 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-3">
                 <p className="text-slate-400 text-sm">No loans yet.</p>
                 <button onClick={() => setTab("new")} className="px-4 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ Create your first loan</button>
               </div>
             )}
-            {db.loans.map((l, i) => {
-              const s = computeStatus(l, db.payments);
+            {db.loans.length > 0 && filteredLoans.length === 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400 text-sm">No {recordFilter === "paid" ? "fully paid" : recordFilter === "active" ? "active" : ""} loans to show.</div>
+            )}
+            {filteredLoans.map(({ l, s }, i) => {
               const isOverdue = s.rows.some(r => r.status !== "PAID" && r.due < parseDate(today()));
               return (
                 <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-2 animate-fade-up">
@@ -871,6 +944,59 @@ function App() {
 
           
           </>)}
+        </>)}
+
+        {/* ── CASH FLOW ── */}
+        {tab === "cashflow" && (<>
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+            <p className="font-bold text-slate-700">Cash Flow</p>
+            <div className="flex gap-2">
+              {[["all", "All"], ["month", "This Month"], ["30d", "30 Days"], ["year", "This Year"]].map(([k, lbl]) => (
+                <button key={k} onClick={() => setCfRange(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfRange === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              {[["all", "All"], ["in", "Inflow"], ["out", "Outflow"]].map(([k, lbl]) => (
+                <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfDir === k ? "bg-slate-800 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Stat label="Total Collected" value={fmt(cashflow.collected)} tone="emerald" />
+            <Stat label="Capital Disbursed" value={fmt(cashflow.disbursed)} tone="amber" />
+            <Stat label="Net Cash Flow" value={fmt(cashflow.net)} tone={cashflow.net >= 0 ? "teal" : "red"} />
+            <Stat label="Interest Earned" value={fmt(cashflow.interest)} tone="emerald" />
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <p className="px-4 py-3 font-bold text-slate-700 border-b border-slate-100">Ledger</p>
+            {cashflow.ledger.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-sm">No cash flow activity in this range.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="bg-slate-100 text-slate-500">
+                    {["Date", "Details", "In", "Out", "Balance"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {cashflow.ledger.map(t => (
+                      <tr key={t.id} onClick={() => { setLoanIdOvr(t.loanId); setSelBorrower(""); setTab("status"); }} className="border-t border-slate-100 active:bg-slate-50 cursor-pointer">
+                        <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(parseDate(t.date))}</td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium text-slate-700">{t.kind}{t.subtype ? ` · ${t.subtype}` : ""}</div>
+                          <div className="text-slate-400">{t.loanId} · {t.borrower}</div>
+                        </td>
+                        <td className="px-3 py-2 text-emerald-700 whitespace-nowrap">{t.inflow ? fmt(t.inflow) : "—"}</td>
+                        <td className="px-3 py-2 text-amber-700 whitespace-nowrap">{t.outflow ? fmt(t.outflow) : "—"}</td>
+                        <td className={`px-3 py-2 font-semibold whitespace-nowrap ${t.balance < 0 ? "text-red-600" : "text-slate-700"}`}>{fmt(t.balance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </>)}
 
         {/* ── LOAN AGREEMENT ── */}

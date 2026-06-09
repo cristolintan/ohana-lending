@@ -3,9 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Ohana Lending Corporant</title>
+  <title>Ohana Lending Corporation</title>
+  <meta name="description" content="Loan manager for records, payments, and agreements. Offline-first Progressive Web App." />
 
   <!-- PWA / iOS meta -->
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Ohana" />
@@ -85,7 +87,7 @@
     // Register service worker
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js').catch(console.error);
+        navigator.serviceWorker.register('sw.js').catch(console.error);
       });
     }
   </script>
