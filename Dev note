@@ -1,0 +1,32 @@
+If you want multi-device, auto-backup, login → Supabase (my overall recommendation)
+Supabase is hosted PostgreSQL with a REST/JS API, built-in auth, and row-level security. For a lending app this is the strongest fit:
+
+Relational data — loans and payments are a classic one-to-many; Postgres models it natively (foreign keys, JOIN, SUM for balances server-side).
+Automatic backups — solves the #1 risk I flagged earlier (clear browser data = everything gone).
+Auth included — covers the "PIN/login" idea; you can have multiple staff with their own accounts.
+No build step required — works from your current CDN/Babel setup via supabase-js from a CDN.
+Free tier is generous for a small operation; scales if you grow.
+Realtime — if two people use it, changes sync live.
+Trade-off: it's network-dependent for writes (though you can keep a local cache for offline reads). You give up "pure offline" for "access anywhere + safe."
+
+If offline-first is sacred, single device → IndexedDB via Dexie.js
+This is the real database upgrade from localStorage while staying 100% client-side, zero backend, zero cost:
+
+Megabytes-to-gigabytes of capacity (localStorage caps ~5 MB).
+Proper indexes, queries, and transactions instead of serializing one big JSON blob on every save.
+Dexie is a thin, pleasant wrapper over IndexedDB and loads from a CDN — keeps your no-build architecture.
+Migration is nearly mechanical: your { loans: [], payments: [] } shape maps to two Dexie tables, and loadDb/saveDb become table reads/writes.
+It does not solve backup or multi-device — you'd still want the export/import button for safety.
+
+Quick comparison
+Option	Offline	Multi-device / backup	Effort	Best when
+Supabase (Postgres)	reads cacheable	✅ yes	medium	you want anywhere-access, auth, safety
+Dexie / IndexedDB	✅ full	❌ no	low	one device, keep it simple & free
+Firebase Firestore	✅ great SDK	✅ yes	medium	similar to Supabase but NoSQL — weaker fit for relational loan data
+Raw IndexedDB	✅	❌	low-med	avoid — verbose vs Dexie for no gain
+Self-hosted Postgres/Node	depends	✅	high	overkill unless you need a custom backend
+My pick: go Supabase — for money records, automatic backups + multi-device access outweigh pure offline, and Postgres is the natural shape for loans/payments. Choose Dexie only if this stays a single offline phone and you want the smallest possible change.
+
+A solid middle path also exists: Dexie locally + sync to Supabase when online (offline-first and backed up), but it's the most work — worth it only once the app is mission-critical.
+
+Want me to implement one of these? If Supabase, I'd start by sketching the loans/payments tables and swapping loadDb/saveDb to async calls (plus a one-time migration of existing localStorage data). If Dexie, I can do the whole swap in one pass since it stays local.

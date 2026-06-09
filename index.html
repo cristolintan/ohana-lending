@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Ohana Lending</title>
+  <title>Ohana Lending Corporant</title>
 
   <!-- PWA / iOS meta -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -36,6 +36,17 @@
     .scroll-ios { -webkit-overflow-scrolling: touch; overflow-y: auto; }
     /* Prevent text size adjustment on rotation */
     html { -webkit-text-size-adjust: 100%; }
+    /* Print: show only the loan agreement document */
+    @media print {
+      body * { visibility: hidden !important; }
+      #agreement-print, #agreement-print * { visibility: visible !important; }
+      #agreement-print {
+        position: absolute; left: 0; top: 0; width: 100%;
+        border: none !important; box-shadow: none !important; border-radius: 0 !important;
+        -webkit-print-color-adjust: exact; print-color-adjust: exact;
+      }
+      .no-print { display: none !important; }
+    }
   </style>
 </head>
 <body>
