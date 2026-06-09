@@ -804,7 +804,7 @@ function App() {
     }));
     const actual = [...disb, ...coll, ...manual].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
     let bal = opening;
-    actual.forEach(t => { bal += t.inflow - t.outflow; t.balance = bal; });
+    actual.forEach((t, i) => { bal += t.inflow - t.outflow; t.balance = bal; t.seq = i; });
     const inRange = actual.filter(t => t.date >= start && t.date <= end);
 
     // Projected upcoming dues (only when toggled on), continuing the running balance.
@@ -812,14 +812,17 @@ function App() {
     if (cfProjected) {
       db.loans.forEach(l => {
         computeStatus(l, db.payments).rows.forEach((r, idx) => {
+          if (r.status === "PAID" || r.amtLeft <= 0.005) return;
+          // Include every remaining unpaid installment. Overdue ones (due date in the
+          // past) are expected "now", so clamp them to today rather than dropping them.
           const dueISO = iso(r.due);
-          if (dueISO >= todayStr && r.status !== "PAID" && r.amtLeft > 0.005)
-            projected.push({ id: `X-${l.id}-${idx}`, date: dueISO, kind: "Scheduled Due", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: r.amtLeft, outflow: 0, projected: true });
+          const date = dueISO < todayStr ? todayStr : dueISO;
+          projected.push({ id: `X-${l.id}-${idx}`, date, kind: "Scheduled Due", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: r.amtLeft, outflow: 0, projected: true });
         });
       });
       projected.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
       let pbal = bal;
-      projected.forEach(t => { pbal += t.inflow; t.balance = pbal; });
+      projected.forEach((t, i) => { pbal += t.inflow; t.balance = pbal; t.seq = actual.length + i; });
     }
 
     // KPIs (actuals in range).
@@ -833,7 +836,7 @@ function App() {
     // Ledger (newest first), respecting the direction filter.
     const ledger = [...inRange, ...projected]
       .filter(t => cfDir === "all" ? true : cfDir === "in" ? t.inflow > 0 : t.outflow > 0)
-      .sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+      .sort((a, b) => b.seq - a.seq); // newest-applied first → running balance reads top-to-bottom
 
     // Monthly buckets for the charts.
     const mMap = {};
@@ -848,7 +851,7 @@ function App() {
 
     // Per-transaction running-balance series for the position line (a "Start"
     // carry-in point keeps the line meaningful even within a single month).
-    const hist = [...inRange, ...projected].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    const hist = [...inRange, ...projected].sort((a, b) => a.seq - b.seq);
     const series = [];
     if (hist.length) {
       const f = hist[0];
