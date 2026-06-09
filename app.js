@@ -163,16 +163,17 @@ function Toast({ msg }) {
   );
 }
 
-// ─── Signature pad (canvas, touch + mouse) ───────────────────────────────────
-function SignaturePad({ label, value, onChange }) {
+// ─── Signature capture (draw in a popup or upload an image) ───────────────────
+function SignatureModal({ label, initial, onCancel, onSave }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const last = useRef({ x: 0, y: 0 });
+  const hasInk = useRef(!!initial);
 
   useEffect(() => {
     const c = canvasRef.current, ctx = c.getContext("2d");
-    ctx.lineWidth = 2; ctx.lineCap = "round"; ctx.strokeStyle = "#0f172a";
-    if (value) { const img = new Image(); img.onload = () => ctx.drawImage(img, 0, 0, c.width, c.height); img.src = value; }
+    ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = "#0f172a";
+    if (initial) { const img = new Image(); img.onload = () => ctx.drawImage(img, 0, 0, c.width, c.height); img.src = initial; }
   }, []);
 
   const pos = e => {
@@ -180,26 +181,76 @@ function SignaturePad({ label, value, onChange }) {
     const t = e.touches && e.touches[0] ? e.touches[0] : e;
     return { x: (t.clientX - r.left) * (c.width / r.width), y: (t.clientY - r.top) * (c.height / r.height) };
   };
-  const start = e => { drawing.current = true; last.current = pos(e); };
+  const start = e => { e.preventDefault(); drawing.current = true; last.current = pos(e); };
   const move = e => {
-    if (!drawing.current) return;
+    if (!drawing.current) return; e.preventDefault();
     const ctx = canvasRef.current.getContext("2d"), p = pos(e);
     ctx.beginPath(); ctx.moveTo(last.current.x, last.current.y); ctx.lineTo(p.x, p.y); ctx.stroke();
-    last.current = p;
+    last.current = p; hasInk.current = true;
   };
-  const end = () => { if (!drawing.current) return; drawing.current = false; onChange(canvasRef.current.toDataURL("image/png")); };
-  const clear = () => { const c = canvasRef.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); onChange(""); };
+  const end = () => { drawing.current = false; };
+  const clear = () => { const c = canvasRef.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); hasInk.current = false; };
+
+  return (
+    <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-4 space-y-3">
+        <p className="font-bold text-slate-700">{label}</p>
+        <canvas ref={canvasRef} width={600} height={250}
+          className="w-full rounded-xl border border-slate-300 bg-white touch-none cursor-crosshair"
+          style={{ height: "40vh" }}
+          onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+          onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
+        <div className="flex gap-2">
+          <button onClick={clear} className="px-4 py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold">Clear</button>
+          <button onClick={onCancel} className="px-4 py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold ml-auto">Cancel</button>
+          <button onClick={() => onSave(hasInk.current ? canvasRef.current.toDataURL("image/png") : "")} className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignatureField({ label, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const fileRef = useRef(null);
+
+  const onFile = e => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 600 / img.width);
+        const cw = Math.round(img.width * scale), ch = Math.round(img.height * scale);
+        const cnv = document.createElement("canvas");
+        cnv.width = cw; cnv.height = ch;
+        cnv.getContext("2d").drawImage(img, 0, 0, cw, ch);
+        onChange(cnv.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
 
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
         <label className={labelCls}>{label}</label>
-        <button type="button" onClick={clear} className="text-xs text-red-400 font-semibold">Clear</button>
+        {value && <button type="button" onClick={() => onChange("")} className="text-xs text-red-400 font-semibold">Remove</button>}
       </div>
-      <canvas ref={canvasRef} width={500} height={150}
-        className="w-full h-28 rounded-xl border border-slate-300 bg-white touch-none cursor-crosshair"
-        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
-        onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
+      <div className="flex items-stretch gap-3">
+        <div className="flex-1 h-20 rounded-xl border border-slate-300 bg-white flex items-center justify-center overflow-hidden">
+          {value ? <img src={value} alt="" className="max-h-20" /> : <span className="text-xs text-slate-300">No signature</span>}
+        </div>
+        <div className="flex flex-col gap-2 justify-center">
+          <button type="button" onClick={() => setOpen(true)} className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-semibold">✍ Draw</button>
+          <button type="button" onClick={() => fileRef.current && fileRef.current.click()} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold">⬆ Upload</button>
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onFile} />
+        </div>
+      </div>
+      {open && <SignatureModal label={label} initial={value} onCancel={() => setOpen(false)} onSave={d => { onChange(d); setOpen(false); }} />}
     </div>
   );
 }
@@ -217,6 +268,36 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
     ...(loan.agreement || {})
   }));
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+  const [busy, setBusy] = useState(false);
+
+  const exportPdf = async () => {
+    const el = document.getElementById("agreement-print");
+    if (!el) return;
+    if (!window.html2canvas || !window.jspdf) { alert("PDF tools are still loading — connect to the internet once so they cache, then try again."); return; }
+    setBusy(true);
+    try {
+      const canvas = await window.html2canvas(el, { scale: 2, backgroundColor: "#ffffff", useCORS: true });
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new window.jspdf.jsPDF("p", "mm", "a4");
+      const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight();
+      const imgW = pageW, imgH = canvas.height * imgW / canvas.width;
+      let heightLeft = imgH, position = 0;
+      pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+      heightLeft -= pageH;
+      while (heightLeft > 0) {
+        position -= pageH;
+        pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+        heightLeft -= pageH;
+      }
+      pdf.save(`Loan Agreement - ${loan.borrower} (${loan.id}).pdf`);
+    } catch (err) {
+      console.error(err);
+      alert("Could not generate the PDF. Try the Print button instead.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const sched = useMemo(() => computeCalc({
     amount: loan.amount, terms: loan.terms, flatRate: loan.flatRate,
@@ -247,11 +328,12 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
   return (
     <div className="space-y-4">
-      <div className="no-print flex items-center justify-between gap-2">
+      <div className="no-print flex flex-wrap items-center gap-2">
         <button onClick={onBack} className="px-3 py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold">← Back</button>
-        <div className="flex gap-2">
+        <div className="flex gap-2 ml-auto">
           <button onClick={() => onSave(f)} className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold">Save</button>
-          <button onClick={() => window.print()} className="px-4 py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold">Print / PDF</button>
+          <button onClick={() => window.print()} className="px-4 py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold">Print</button>
+          <button onClick={exportPdf} disabled={busy} className="px-4 py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold disabled:opacity-50">{busy ? "Generating…" : "Download PDF"}</button>
         </div>
       </div>
 
@@ -271,12 +353,12 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
       <div className="no-print bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
         <p className="font-bold text-slate-700">Signatures</p>
-        <p className="text-xs text-slate-400 -mt-2">Sign with finger or mouse — saved with the agreement.</p>
-        <SignaturePad label="Lender Signature" value={f.sigLender} onChange={v => set("sigLender", v)} />
-        <SignaturePad label="Borrower Signature" value={f.sigBorrower} onChange={v => set("sigBorrower", v)} />
-        <SignaturePad label="Guarantor Signature" value={f.sigGuarantor} onChange={v => set("sigGuarantor", v)} />
-        <SignaturePad label="Witness 1 Signature" value={f.sigWitness1} onChange={v => set("sigWitness1", v)} />
-        <SignaturePad label="Witness 2 Signature" value={f.sigWitness2} onChange={v => set("sigWitness2", v)} />
+        <p className="text-xs text-slate-400 -mt-2">Tap Draw to sign in a popup, or Upload an image — saved with the agreement.</p>
+        <SignatureField label="Lender Signature" value={f.sigLender} onChange={v => set("sigLender", v)} />
+        <SignatureField label="Borrower Signature" value={f.sigBorrower} onChange={v => set("sigBorrower", v)} />
+        <SignatureField label="Guarantor Signature" value={f.sigGuarantor} onChange={v => set("sigGuarantor", v)} />
+        <SignatureField label="Witness 1 Signature" value={f.sigWitness1} onChange={v => set("sigWitness1", v)} />
+        <SignatureField label="Witness 2 Signature" value={f.sigWitness2} onChange={v => set("sigWitness2", v)} />
       </div>
 
       <div id="agreement-print" className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm text-slate-800 text-sm leading-relaxed space-y-2"
