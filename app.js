@@ -680,6 +680,18 @@ function App() {
 
   const resetForm = () => { setEditId(null); setName(""); setAmount(10000); setTerms(6); setFlatRate(3.6); setFrequency("Semi-Monthly"); setStartDate(today()); setDropRate(3.6); };
 
+  const exportSchedulePng = async () => {
+    const el = document.getElementById("projected-export");
+    if (!el || !window.html2canvas) { flash("Image tools not ready — reload once online."); return; }
+    try {
+      const canvas = await window.html2canvas(el, { scale: 2, backgroundColor: "#ffffff", ignoreElements: n => n.classList && n.classList.contains("no-capture") });
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = `Schedule - ${name.trim() || "loan"}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { console.error(e); flash("Could not export image."); }
+  };
+
   const editLoan = l => {
     setEditId(l.id);
     setName(l.borrower);
@@ -1001,8 +1013,14 @@ function App() {
           
 
           {calc.rows.length > 0 && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <p className="px-4 py-3 font-bold text-slate-700 border-b border-slate-100">Projected Schedule</p>
+            <div id="projected-export" className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                <div>
+                  <p className="font-bold text-slate-700">Projected Schedule</p>
+                  <p className="text-xs text-slate-500">{name.trim() || "Unnamed"}</p>
+                </div>
+                <button onClick={exportSchedulePng} className="no-capture px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold active:bg-slate-100 transition">⬇ Export Table</button>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead><tr className="bg-slate-100 text-slate-500">
