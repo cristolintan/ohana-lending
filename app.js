@@ -416,20 +416,7 @@ function App() {
               </div>
               <button onClick={addPayment} className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm">Add Payment</button>
 
-              {loanPayments.length > 0 && (
-                <div className="space-y-1.5 pt-1">
-                  {loanPayments.map(p => (
-                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
-                      <span className="font-semibold">{fmt(p.amount)}</span>
-                      <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
-                      <button onClick={() => persist({ ...db, payments: db.payments.filter(x => x.id !== p.id) })} className="text-red-400 pl-2 text-base leading-none">×</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Schedule */}
+                {/* Schedule */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <p className="px-4 py-3 font-bold text-slate-700 border-b border-slate-100">Schedule & Status</p>
               <div className="overflow-x-auto">
@@ -462,6 +449,21 @@ function App() {
                 </table>
               </div>
             </div>
+
+              {loanPayments.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  {loanPayments.map(p => (
+                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+                      <span className="font-semibold">{fmt(p.amount)}</span>
+                      <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
+                      <button onClick={() => persist({ ...db, payments: db.payments.filter(x => x.id !== p.id) })} className="text-red-400 pl-2 text-base leading-none">×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+          
           </>)}
         </>)}
       </main>
