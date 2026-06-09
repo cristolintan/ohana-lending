@@ -259,8 +259,8 @@ function SignatureField({ label, value, onChange }) {
 function AgreementView({ loan, fmt, onBack, onSave }) {
   const [f, setF] = useState(() => ({
     lenderName: "Liezel Anne Davalos",
-    lenderAddress: "B19 L13 Ph1 Josenia St. Mayamot, Antipolo City",
-    lenderId: "P9245579C",
+    lenderAddress: "",
+    lenderId: "",
     borrowerAddress: "", borrowerId: "", purpose: "",
     guarantorName: "", guarantorAddress: "", guarantorId: "",
     witness1: "", witness2: "", agreementDate: today(),
@@ -595,7 +595,7 @@ function App() {
   const navItems = [
     { id: "new",     label: "New Loan",  icon: "calculator" },
     { id: "records", label: "Records",   icon: "file-text" },
-    { id: "status",  label: "Payments",  icon: "wallet" },
+    { id: "status",  label: "Payments & Status",  icon: "wallet" },
   ];
 
   return (
@@ -641,32 +641,32 @@ function App() {
                 <input type="number" inputMode="decimal" step="0.1" className={inputCls} value={flatRate} onChange={e => setFlatRate(e.target.value)} />
               </div>
               <div>
-                <label className={labelCls}>Decline Rate %</label>
-                <input type="number" inputMode="decimal" step="0.1" className={inputCls} value={dropRate} onChange={e => setDropRate(e.target.value)} />
-              </div>
-            </div>
-            <div>
               <label className={labelCls}>Frequency</label>
               <select className={inputCls} value={frequency} onChange={e => setFrequency(e.target.value)}>
                 <option>Semi-Monthly</option><option>Monthly</option>
               </select>
             </div>
-            <div>
+            <div className="col-span-2">
               <label className={labelCls}>Start Date</label>
               <input type="date" className={inputCls} value={startDate} onChange={e => setStartDate(e.target.value)} />
             </div>
+            </div>
+
+            <div>
+              <label className={labelCls}>Decline Rate — <span className="text-emerald-600 font-bold">{Number(dropRate || 0).toFixed(1)}%</span></label>
+              <input type="range" min="0" max="10" step="0.1" value={dropRate} onChange={e => setDropRate(e.target.value)} className="w-full accent-emerald-600 cursor-pointer" />
+              <div className="flex justify-between text-[10px] text-slate-400 mt-1"><span>0%</span><span>5%</span><span>10%</span></div>
+            </div>
+
+            
+
             <div className="flex gap-2 pt-1">
               <button onClick={saveLoan} className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm transition">{editId ? "Update Loan" : "Save Loan"}</button>
               <button onClick={resetForm} className="px-4 py-3 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-medium transition">{editId ? "Cancel" : "Reset"}</button>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <Stat label="Loan Amount" value={fmt(amount)} tone="slate" />
-            <Stat label="Total Interest" value={fmt(calc.totalInterest)} tone="amber" />
-            <Stat label="Total Repayment" value={fmt(calc.totalRepay)} tone="emerald" />
-            <Stat label="Periods" value={calc.rows.length} tone="teal" />
-          </div>
+          
 
           {calc.rows.length > 0 && (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -698,6 +698,14 @@ function App() {
               </div>
             </div>
           )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Stat label="Loan Amount" value={fmt(amount)} tone="slate" />
+            <Stat label="Total Interest" value={fmt(calc.totalInterest)} tone="amber" />
+            <Stat label="Total Repayment" value={fmt(calc.totalRepay)} tone="emerald" />
+            <Stat label="Periods" value={calc.rows.length} tone="teal" />
+          </div>
+          
         </>)}
 
         {/* ── RECORDS ── */}
