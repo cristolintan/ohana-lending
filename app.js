@@ -71,7 +71,7 @@ async function ensureSession() {
 
 // Row → app-shape mappers (snake_case DB ↔ camelCase app)
 const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r.amount, terms: r.terms,
-  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at });
+  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null });
 const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
 const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
 
@@ -105,6 +105,7 @@ const api = {
     if (error) throw error;
   },
   async deleteLoan(id) { const { error } = await sb.from("loans").delete().eq("id", id); if (error) throw error; },
+  async setFreqChange(id, fc) { const { error } = await sb.from("loans").update({ freq_change: fc }).eq("id", id); if (error) throw error; },
   async addPayment(p) { const { error } = await sb.from("payments").insert({ loan_id: p.loanId, date: p.date, amount: p.amount, type: p.type }); if (error) throw error; },
   async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
   async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
@@ -149,7 +150,7 @@ function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }
   return { rows, totalInterest, totalRepay: pAmt + totalInterest };
 }
 
-function computeStatus(loan, allPayments) {
+function computeStatusBase(loan, allPayments) {
   const pAmt = Number(loan.amount), terms = Math.floor(Number(loan.terms));
   const rate = Number(loan.flatRate) / 100;
   const multiplier = loan.frequency === "Monthly" ? 2 : 1;
@@ -188,6 +189,58 @@ function computeStatus(loan, allPayments) {
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
   const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
   return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft === 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
+}
+
+// Wraps the schedule engine. If the loan has a mid-stream frequency change
+// ({date, frequency}), installments before that date are kept as-is and the
+// remaining balance is re-spaced under the new frequency to the original end
+// date — total principal & interest unchanged, interest still diminishing.
+function computeStatus(loan, allPayments) {
+  const base = computeStatusBase(loan, allPayments);
+  const fc = loan.freqChange;
+  if (!fc || !fc.date || (!fc.frequency && !fc.terms)) return base;
+  const D = parseDate(fc.date), F1 = fc.frequency || loan.frequency;
+  const kept = base.rows.filter(r => r.due < D);
+  const after = base.rows.filter(r => !(r.due < D));
+  if (!after.length) return base;                 // switch falls after the loan ends → no change
+  const pAmt = Number(loan.amount), totalLogged = base.totalLogged, rate = Number(loan.flatRate) / 100;
+  const remP = after.reduce((s, r) => s + r.principal, 0);
+  const mult = f => f === "Monthly" ? 2 : 1;
+  const explicitTerms = fc.terms && Number(fc.terms) > 0;
+  // New remaining installment count: explicit if given, else derived from the
+  // frequency change keeping the original payoff date.
+  const n = explicitTerms
+    ? Math.min(240, Math.floor(Number(fc.terms)))
+    : Math.max(1, Math.round(after.length * mult(loan.frequency) / mult(F1)));
+  // Changing the term re-prices interest on the remaining balance (more terms = more
+  // interest). A frequency-only change keeps the original remaining interest.
+  const remI = explicitTerms ? remP * rate * n * mult(F1) : after.reduce((s, r) => s + r.interest, 0);
+  const avgI = remI / n, dropR = (remP * 0.03) / n;   // diminishing model, scaled to the remainder
+  const rem = [];
+  for (let i = 0; i < n; i++) {
+    let due;
+    if (F1 === "Monthly") due = edate(D, i);
+    else due = i % 2 === 0 ? edate(D, i / 2) : addDays(edate(D, (i - 1) / 2), 15);
+    rem.push({ principal: remP / n, interest: avgI + ((n + 1) / 2 - (i + 1)) * dropR, due, isSwitched: true });
+  }
+  const combined = [
+    ...kept.map(r => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt })),
+    ...rem
+  ];
+  let prevRem = pAmt, cumDue = 0; const rows = [];
+  combined.forEach((r, i) => {
+    const remaining = prevRem, total = r.principal + r.interest;
+    cumDue += total;
+    const status = totalLogged >= cumDue ? "PAID" : totalLogged > cumDue - total ? "PARTIAL" : "UNPAID";
+    const amtLeft = Math.max(0, total - Math.max(0, totalLogged - (cumDue - total)));
+    rows.push({ period: r.isExt ? `${i + 1} (Ext)` : String(i + 1), remaining, principal: r.principal, interest: r.interest, total, due: r.due, status, amtLeft, isExt: !!r.isExt, switched: !!r.isSwitched });
+    prevRem = remaining - r.principal;
+  });
+  // Totals are recomputed from the revised rows (a term change moves the interest).
+  const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
+  const summedTotal = rows.reduce((s, r) => s + r.total, 0);
+  const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
+  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0.005 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
 // ─── Cash flow helpers ─────────────────────────────────────────────────────────
@@ -627,6 +680,19 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 function App() {
   const [db, setDb] = useState({ loans: [], payments: [], transactions: [], settings: {} });
   const [loading, setLoading] = useState(true);
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPass, setAuthPass] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMsg, setAuthMsg] = useState("");
+  const [approved, setApproved] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [adminPending, setAdminPending] = useState([]);
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminBusy, setAdminBusy] = useState(false);
   const [tab, setTab] = useState("new");
   const [currency, setCurrency] = useState("PHP");
   const [toast, setToast] = useState("");
@@ -657,21 +723,40 @@ function App() {
   const [payAmount, setPayAmount] = useState("");
   const [payType, setPayType] = useState("Standard");
   const [payDate, setPayDate] = useState(today());
+  const [freqDate, setFreqDate] = useState(today());
+  const [revFreq, setRevFreq] = useState("");
+  const [revTerms, setRevTerms] = useState("");
 
   const flash = msg => { setToast(msg); setTimeout(() => setToast(""), 2500); };
   const refresh = useCallback(async () => { const data = await api.fetchAll(); setDb(data); return data; }, []);
 
-  // Initial load: ensure a (silent anonymous) session for the DB role, then fetch
-  // the shared data. Records are visible to every device; user_id is still stamped
-  // server-side so per-user accounts can be switched on later.
-  useEffect(() => {
-    if (!sb) { setLoading(false); flash("Supabase failed to load."); return; }
-    (async () => {
-      try { await ensureSession(); const data = await refresh(); setOpeningInput(String(data.settings.openingBalance || "")); }
-      catch (e) { console.error(e); flash("Could not connect to the database."); }
-      finally { setLoading(false); }
-    })();
+  // Auth gate: require a real (non-anonymous) login. Records are shared across all
+  // logged-in users. Data loads only once a session exists.
+  const loadShared = useCallback(async () => {
+    try { const d = await refresh(); setOpeningInput(String(d.settings.openingBalance || "")); }
+    catch (e) { console.error(e); flash("Could not load data — check connection."); }
+    finally { setLoading(false); }
   }, [refresh]);
+
+  useEffect(() => {
+    if (!sb) { setAuthReady(true); setLoading(false); flash("Supabase failed to load."); return; }
+    let mounted = true;
+    const isUser = s => s && !s.user.is_anonymous;
+    const apply = async s => {
+      if (s && s.user.is_anonymous) { await sb.auth.signOut(); s = null; }   // drop stale anon sessions
+      if (!mounted) return;
+      setSession(s);
+      if (!isUser(s)) { setApproved(false); setIsAdmin(false); setLoading(false); setAuthReady(true); return; }
+      let ok = false, admin = false;
+      try { const r = await Promise.all([sb.rpc("is_approved"), sb.rpc("is_admin")]); ok = !!r[0].data; admin = !!r[1].data; } catch (e) { console.error(e); }
+      if (!mounted) return;
+      setApproved(ok); setIsAdmin(admin);
+      if (ok) await loadShared(); else setLoading(false);
+      setAuthReady(true);
+    };
+    const { data: { subscription } } = sb.auth.onAuthStateChange((_e, s) => { apply(s); });
+    return () => { mounted = false; subscription.unsubscribe(); };
+  }, [loadShared]);
 
   const sym = currency === "PHP" ? "₱" : "$";
   const fmt = v => sym + Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -759,6 +844,59 @@ function App() {
       await refresh();
       flash(`Imported ${loans.length} loan(s).`);
     } catch (e) { console.error(e); flash("Import failed — check connection."); }
+  };
+
+  // ── Login (shared team access) ──
+  const signIn = async () => {
+    setAuthMsg("");
+    if (!sb) { setAuthMsg("Database library failed to load — reload the page."); return; }
+    if (!authEmail || !authPass) { setAuthMsg("Enter your email and password."); return; }
+    setAuthBusy(true);
+    try { const { error } = await sb.auth.signInWithPassword({ email: authEmail.trim(), password: authPass }); if (error) throw error; setAuthPass(""); }
+    catch (e) { console.error(e); setAuthMsg(e.message || "Sign in failed."); }
+    finally { setAuthBusy(false); }
+  };
+  const createAccount = async () => {
+    setAuthMsg("");
+    if (!sb) { setAuthMsg("Database library failed to load — reload the page."); return; }
+    if (!authEmail || authPass.length < 6) { setAuthMsg("Enter an email and a password of at least 6 characters."); return; }
+    setAuthBusy(true);
+    try {
+      const { data, error } = await sb.auth.signUp({ email: authEmail.trim(), password: authPass });
+      if (error) throw error;
+      if (data.session) setAuthPass("");                 // signed in → gate hides automatically
+      else setAuthMsg("Account created. Confirm via the email link, then Sign in.");
+    } catch (e) { console.error(e); setAuthMsg(e.message || "Could not create account."); }
+    finally { setAuthBusy(false); }
+  };
+  const signOut = async () => { try { await sb.auth.signOut(); flash("Signed out."); } catch (e) { console.error(e); flash("Sign out failed."); } };
+
+  // ── Admin: manage who can access (allowlist) ──
+  const loadAdmin = async () => {
+    try {
+      const [a, p] = await Promise.all([
+        sb.from("allowed_users").select("email, role, added_at").order("added_at", { ascending: false }),
+        sb.rpc("pending_users"),
+      ]);
+      if (a.error) throw a.error;
+      setAdminUsers(a.data || []);
+      setAdminPending(p.data || []);
+    } catch (e) { console.error(e); flash("Could not load users."); }
+  };
+  const openAdmin = async () => { setShowAdmin(true); await loadAdmin(); };
+  const approveEmail = async em => {
+    const e = (em || "").trim().toLowerCase();
+    if (!e) { flash("Enter an email."); return; }
+    setAdminBusy(true);
+    try { const { error } = await sb.from("allowed_users").insert({ email: e, role: "user" }); if (error) throw error; setAdminEmail(""); await loadAdmin(); flash(`Approved ${e}`); }
+    catch (err) { console.error(err); flash(err.message || "Could not approve."); }
+    finally { setAdminBusy(false); }
+  };
+  const revokeEmail = async em => {
+    if (session && em.toLowerCase() === (session.user.email || "").toLowerCase()) { flash("You can't remove your own access."); return; }
+    if (!confirm(`Remove access for ${em}?`)) return;
+    try { const { error } = await sb.from("allowed_users").delete().eq("email", em); if (error) throw error; await loadAdmin(); flash(`Removed ${em}`); }
+    catch (err) { console.error(err); flash(err.message || "Could not remove."); }
   };
 
   const borrowers = useMemo(() => [...new Set(db.loans.map(l => l.borrower))], [db.loans]);
@@ -943,6 +1081,23 @@ function App() {
   };
   const deletePayment = async id => { try { await api.delPayment(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
 
+  const applyRevision = async loan => {
+    if (!freqDate) { flash("Pick an effective date."); return; }
+    const fc = { date: freqDate };
+    if (revFreq) fc.frequency = revFreq;
+    if (revTerms && Number(revTerms) > 0) fc.terms = Math.floor(Number(revTerms));
+    if (!fc.frequency && !fc.terms) { flash("Choose a new frequency and/or number of installments."); return; }
+    const desc = [fc.frequency, fc.terms ? `${fc.terms} installments` : null].filter(Boolean).join(", ");
+    const note = fc.terms ? "total interest re-prices for the new term" : "same total owed";
+    if (!confirm(`Revise ${loan.ref || loan.id} from ${fmtDate(parseDate(freqDate))} → ${desc}? Paid installments stay; the remaining balance re-amortizes (${note}).`)) return;
+    try { await api.setFreqChange(loan.id, fc); await refresh(); setRevFreq(""); setRevTerms(""); flash("Schedule revised."); }
+    catch (e) { console.error(e); flash("Could not revise schedule."); }
+  };
+  const clearRevision = async loan => {
+    try { await api.setFreqChange(loan.id, null); await refresh(); flash("Revision removed."); }
+    catch (e) { console.error(e); flash("Could not update."); }
+  };
+
   const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
 
   // Reset scroll to top whenever the tab changes (better mobile flow)
@@ -970,10 +1125,14 @@ function App() {
             <p className="text-emerald-200 text-xs">{loading ? "Connecting…" : `☁ ${db.loans.length} loans`}</p>
           </div>
         </div>
-        <select className="px-2.5 py-1.5 rounded-lg text-slate-800 text-sm bg-white" value={currency} onChange={e => setCurrency(e.target.value)}>
-          <option value="PHP">₱ Peso</option>
-          <option value="USD">$ Dollar</option>
-        </select>
+        <div className="flex items-center gap-2">
+          <select className="px-2.5 py-1.5 rounded-lg text-slate-800 text-sm bg-white" value={currency} onChange={e => setCurrency(e.target.value)}>
+            <option value="PHP">₱ Peso</option>
+            <option value="USD">$ Dollar</option>
+          </select>
+          {isAdmin && <button onClick={openAdmin} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-xs font-semibold">Admin</button>}
+          {session && !session.user.is_anonymous && <button onClick={signOut} title={session.user.email} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-xs font-semibold">Sign out</button>}
+        </div>
       </header>
 
       {/* Body */}
@@ -1171,7 +1330,37 @@ function App() {
               <Badge s={statusData.overallStatus} />
             </div>
 
-           
+            {/* Revise remaining schedule (frequency and/or terms) */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+              <p className="font-bold text-slate-700">Revise Remaining Schedule</p>
+              <p className="text-xs text-slate-500">
+                Current: {resolved.loan.frequency} · {resolved.loan.terms} terms
+                {resolved.loan.freqChange && <> → <span className="font-semibold text-emerald-700">{resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? `, ${resolved.loan.freqChange.terms} installments` : ""}</span> from {fmtDate(parseDate(resolved.loan.freqChange.date))}</>}
+              </p>
+              {resolved.loan.freqChange ? (
+                <button onClick={() => clearRevision(resolved.loan)} className="px-3 py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Undo revision</button>
+              ) : (<>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Effective date</label>
+                    <input type="date" className={inputCls} value={freqDate} onChange={e => setFreqDate(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>New frequency</label>
+                    <select className={inputCls} value={revFreq} onChange={e => setRevFreq(e.target.value)}>
+                      <option value="">Keep ({resolved.loan.frequency})</option>
+                      <option>Monthly</option><option>Semi-Monthly</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className={labelCls}>Remaining installments</label>
+                    <input type="number" inputMode="numeric" className={inputCls} value={revTerms} onChange={e => setRevTerms(e.target.value)} placeholder="leave blank = keep same payoff date" />
+                  </div>
+                  <p className="col-span-2 text-[11px] text-slate-400 -mt-1">Changing the number of installments re-prices the total interest; a frequency-only change keeps the same total.</p>
+                </div>
+                <button onClick={() => applyRevision(resolved.loan)} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Apply revision</button>
+              </>)}
+            </div>
 
             {/* Schedule */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1401,6 +1590,74 @@ function App() {
           </button>
         ))}
       </nav>
+
+      {(!authReady || !session || session.user.is_anonymous || !approved) && (
+        <div className="fixed inset-0 z-[60] bg-emerald-700 flex items-center justify-center p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 space-y-4">
+            <div className="text-center space-y-1">
+              <div className="w-12 h-12 mx-auto rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold">OLC</div>
+              <p className="font-bold text-slate-800">JAVILAT LENDING</p>
+              <p className="text-xs text-slate-400">{session && !session.user.is_anonymous ? "Account access" : "Sign in to access records"}</p>
+            </div>
+            {!authReady ? (
+              <p className="text-center text-sm text-slate-400 py-4">Loading…</p>
+            ) : (session && !session.user.is_anonymous && !approved) ? (<>
+              <p className="text-sm text-slate-600 text-center">Your account <b className="text-slate-800">{session.user.email}</b> is pending administrator approval.</p>
+              <p className="text-xs text-slate-400 text-center">Ask the administrator to grant your email access, then reload.</p>
+              <button onClick={signOut} className="w-full py-2.5 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Sign out</button>
+            </>) : (<>
+              <div>
+                <label className={labelCls}>Email</label>
+                <input type="email" autoComplete="email" className={inputCls} value={authEmail} onChange={e => setAuthEmail(e.target.value)} placeholder="you@example.com" />
+              </div>
+              <div>
+                <label className={labelCls}>Password</label>
+                <input type="password" autoComplete="current-password" className={inputCls} value={authPass} onChange={e => setAuthPass(e.target.value)} placeholder="••••••••" onKeyDown={e => { if (e.key === "Enter") signIn(); }} />
+              </div>
+              {authMsg && <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{authMsg}</p>}
+              <button disabled={authBusy} onClick={signIn} className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm disabled:opacity-50 transition">{authBusy ? "Please wait…" : "Sign in"}</button>
+              <button disabled={authBusy} onClick={createAccount} className="w-full py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold disabled:opacity-50 active:bg-slate-100 transition">Create account</button>
+            </>)}
+          </div>
+        </div>
+      )}
+
+      {showAdmin && isAdmin && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 no-print" onClick={() => setShowAdmin(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 space-y-4 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <p className="font-bold text-slate-700">Manage access</p>
+              <button onClick={() => setShowAdmin(false)} className="text-slate-400 text-sm">Close</button>
+            </div>
+            <div className="flex gap-2">
+              <input type="email" className={inputCls} value={adminEmail} onChange={e => setAdminEmail(e.target.value)} placeholder="email to approve" onKeyDown={e => { if (e.key === "Enter") approveEmail(adminEmail); }} />
+              <button disabled={adminBusy} onClick={() => approveEmail(adminEmail)} className="px-4 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold disabled:opacity-50">Approve</button>
+            </div>
+
+            {adminPending.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Pending sign-ups</p>
+                {adminPending.map(u => (
+                  <div key={u.email} className="flex items-center justify-between bg-amber-50 rounded-xl px-3 py-2 text-xs gap-2">
+                    <span className="text-slate-700 truncate">{u.email}</span>
+                    <button onClick={() => approveEmail(u.email)} className="px-3 py-1 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white font-semibold shrink-0">Approve</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Approved users</p>
+              {adminUsers.length === 0 ? <p className="text-xs text-slate-400">No one yet.</p> : adminUsers.map(u => (
+                <div key={u.email} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs gap-2">
+                  <span className="text-slate-700 truncate">{u.email}{u.role === "admin" ? " · admin" : ""}</span>
+                  <button onClick={() => revokeEmail(u.email)} className="text-red-500 font-semibold pl-2 shrink-0">Remove</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <Toast msg={toast} />
     </div>
