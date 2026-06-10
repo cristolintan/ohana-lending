@@ -912,6 +912,20 @@ function App() {
 
   const statusData = useMemo(() => resolved.loan ? computeStatus(resolved.loan, db.payments) : null, [resolved, db.payments]);
 
+  const nextUnpaidRow = useMemo(() => {
+    if (!statusData) return null;
+    return statusData.rows.find(r => r.amtLeft > 0) || statusData.rows[statusData.rows.length - 1] || null;
+  }, [statusData]);
+
+  useEffect(() => {
+    if (!nextUnpaidRow) return;
+    if (payType === "Standard") {
+      setPayAmount(round2(nextUnpaidRow.amtLeft).toFixed(2));
+    } else if (payType === "Minimum Due") {
+      setPayAmount(round2(nextUnpaidRow.interest).toFixed(2));
+    }
+  }, [payType, nextUnpaidRow]);
+
   const addPayment = async () => {
     if (!resolved.loan) return;
     const amt = Number(payAmount);
@@ -1116,7 +1130,7 @@ function App() {
                     <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
                   </div>
                   <div className="flex gap-2 pt-1">
-                    <button onClick={() => { setLoanIdOvr(l.id); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">View Payments</button>
+                    <button onClick={() => { setLoanIdOvr(l.ref); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">View Payments</button>
                     {s.overallStatus !== "FULLY PAID" && <button onClick={() => editLoan(l)} className="px-4 py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Edit</button>}
                     <button onClick={() => deleteLoan(l.id, l.ref)} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Delete</button>
                   </div>
@@ -1199,7 +1213,10 @@ function App() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelCls}>Amount</label>
-                  <input type="number" inputMode="decimal" className={inputCls} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{sym}</span>
+                    <input type="number" inputMode="decimal" className={`${inputCls} pl-8`} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
+                  </div>
                 </div>
                 <div>
                   <label className={labelCls}>Type</label>
@@ -1245,11 +1262,6 @@ function App() {
             <div className="flex gap-2">
               {[["all", "All"], ["month", "This Month"], ["30d", "30 Days"], ["year", "This Year"]].map(([k, lbl]) => (
                 <button key={k} onClick={() => setCfRange(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfRange === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              {[["all", "All"], ["in", "Inflow"], ["out", "Outflow"]].map(([k, lbl]) => (
-                <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfDir === k ? "bg-slate-800 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
               ))}
             </div>
             <div className="flex items-center gap-2">
@@ -1324,11 +1336,23 @@ function App() {
             ))}
           </div>
 
+             {/* ── LEDGER ── */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+
+             <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
               <p className="font-bold text-slate-700">Ledger</p>
               {cashflow.ledger.length > 0 && <button onClick={exportCsv} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold active:bg-slate-100 transition">⬇ CSV</button>}
             </div>
+             
+              <div className="bg-white rounded-2xl  p-4 space-y-3 shadow-sm">
+            <div className="flex gap-2">
+              {[["all", "All"], ["in", "Inflow"], ["out", "Outflow"]].map(([k, lbl]) => (
+                <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfDir === k ? "bg-slate-800 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
+              ))}
+            </div>
+            </div>
+
+           
             {cashflow.ledger.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-sm">No cash flow activity in this range.</div>
             ) : (
@@ -1339,7 +1363,8 @@ function App() {
                   </tr></thead>
                   <tbody>
                     {cashflow.ledger.map(t => (
-                      <tr key={t.id} onClick={() => { if (t.loanId) { setLoanIdOvr(t.loanId); setSelBorrower(""); setTab("status"); } }} className={`border-t border-slate-100 ${t.loanId ? "active:bg-slate-50 cursor-pointer" : ""} ${t.projected ? "opacity-60" : ""}`}>
+                      console.log(t),
+                      <tr key={t.id} onClick={() => { if (t.ref) { setLoanIdOvr(t.ref); setSelBorrower(""); setTab("status"); } }} className={`border-t border-slate-100 ${t.loanId ? "active:bg-slate-50 cursor-pointer" : ""} ${t.projected ? "opacity-60" : ""}`}>
                         <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(parseDate(t.date))}</td>
                         <td className="px-3 py-2">
                           <div className="font-medium text-slate-700 flex items-center gap-1">
