@@ -652,7 +652,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
         <H>GUARANTOR (JOINT AND SOLIDARY LIABILITY)</H>
         <p>For value received, the undersigned Guarantor hereby binds himself/herself jointly and severally with the Borrower for the full and prompt payment of all obligations under this Agreement. The liability is direct and immediate; the Lender is not required to exhaust remedies against the Borrower before proceeding against the Guarantor; and this guarantee remains valid until full payment of the loan.</p>
-        <p>Guarantor: <b>{f.guarantorName || "_____"}</b> — {f.guarantorAddress || "_____"} — Gov't ID No. {f.guarantorId || "_____"}</p>
+        <p><b>Guarantor: {f.guarantorName || "_____"} — {f.guarantorAddress || "_____"} — Gov't ID No. {f.guarantorId || "_____"}</b></p>
 
         <H>ACKNOWLEDGMENT</H>
         <p>By signing below, the Parties acknowledge that they have read, understood, and voluntarily agreed to all terms and conditions of this Agreement.</p>
@@ -666,13 +666,36 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
           <div></div>
         </div>
 
-        <p className="pt-6">Signed in the presence of:</p>
-        <div className="grid grid-cols-2 gap-6 pt-2">
-          <Sig src={f.sigWitness1} name={f.witness1} role="Witness 1" />
-          <Sig src={f.sigWitness2} name={f.witness2} role="Witness 2" />
-        </div>
+       
+        {(f.witness1 || f.witness2) && (
+          <>
+            <p className="pt-6">Signed in the presence of:</p>
+            <div className="grid grid-cols-2 gap-6 pt-2">
+              {f.witness1 && <Sig src={f.sigWitness1} name={f.witness1} role="Witness 1" />}
+              {f.witness2 && <Sig src={f.sigWitness2} name={f.witness2} role="Witness 2" />}
+            </div>
+          </>
+        )}
+        
+        <p className="pt-6 font-bold">
+          All known to me and to me known to be the same persons who executed the foregoing Loan Agreement consisting of 3 pages, including this page, and they acknowledged to me that the same is their free and voluntary act and deed.
+        </p>
+        <p className="pt-6 font-bold">
+          This instrument refers to a Loan Agreement covering the principal amount of {pesoWords(loan.amount)} ({fmt(loan.amount)}).
+        </p>
+        <p className="pt-6 font-bold">
+          WITNESS MY HAND AND SEAL on the date and place first above written.
+        </p>
+        <p className="font-bold">Notary Public</p>
+        <p className="font-bold">Doc. No. ___</p>
+        <p className="font-bold">Page No. ___</p>
+        <p className="font-bold">Book No. ___</p>
+        <p className="font-bold">Series of 2026</p>
       </div>
+
+
     </div>
+
   );
 }
 
