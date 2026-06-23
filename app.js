@@ -71,7 +71,7 @@ async function ensureSession() {
 
 // Row → app-shape mappers (snake_case DB ↔ camelCase app)
 const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r.amount, terms: r.terms,
-  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null });
+  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null, idImage: r.id_image || null });
 const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
 const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
 
@@ -106,6 +106,7 @@ const api = {
   },
   async deleteLoan(id) { const { error } = await sb.from("loans").delete().eq("id", id); if (error) throw error; },
   async setFreqChange(id, fc) { const { error } = await sb.from("loans").update({ freq_change: fc }).eq("id", id); if (error) throw error; },
+  async setIdImage(id, dataUrl) { const { error } = await sb.from("loans").update({ id_image: dataUrl }).eq("id", id); if (error) throw error; },
   async addPayment(p) { const { error } = await sb.from("payments").insert({ loan_id: p.loanId, date: p.date, amount: p.amount, type: p.type }); if (error) throw error; },
   async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
   async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
@@ -472,6 +473,71 @@ function SignatureField({ label, value, onChange }) {
       </div>
       {open && <SignatureModal label={label} initial={value} onCancel={() => setOpen(false)} onSave={d => { onChange(d); setOpen(false); }} />}
     </div>
+  );
+}
+
+// ─── Borrower ID photo (upload / view / replace / remove) ─────────────────────
+// Reads a file, downscales it on a canvas (JPEG, like SignatureField does for
+// images), and hands back a base64 data URL — same base64-in-DB pattern used by
+// the agreement signatures. The image is stored on the loan row (id_image).
+function IdPhotoButton({ image, onUpload, onRemove }) {
+  const fileRef = useRef(null);
+  const [viewing, setViewing] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const pick = () => fileRef.current && fileRef.current.click();
+
+  const onFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+        const cw = Math.round(img.width * scale), ch = Math.round(img.height * scale);
+        const cnv = document.createElement("canvas");
+        cnv.width = cw; cnv.height = ch;
+        cnv.getContext("2d").drawImage(img, 0, 0, cw, ch);
+        Promise.resolve(onUpload(cnv.toDataURL("image/jpeg", 0.82))).finally(() => setBusy(false));
+      };
+      img.onerror = () => setBusy(false);
+      img.src = reader.result;
+    };
+    reader.onerror = () => setBusy(false);
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <>
+      <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onFile} />
+      {image ? (
+        <div className="flex items-center gap-2 pt-1">
+          <button type="button" onClick={() => setViewing(true)} className="shrink-0">
+            <img src={image} alt="Borrower ID" className="h-12 w-12 rounded-lg object-cover border border-slate-300" />
+          </button>
+          <button type="button" onClick={() => setViewing(true)} className="flex-1 py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">🪪 View ID</button>
+          <button type="button" onClick={pick} disabled={busy} className="px-4 py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition disabled:opacity-50">{busy ? "…" : "Replace"}</button>
+          <button type="button" onClick={onRemove} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Remove</button>
+        </div>
+      ) : (
+        <button type="button" onClick={pick} disabled={busy} className="w-full py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition disabled:opacity-50 flex items-center justify-center gap-2">{busy ? "Uploading…" : <>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 16V4"/>
+            <path d="M7 9l5-5 5 5"/>
+            <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+          </svg>
+          Upload ID
+        </>}</button>
+      )}
+      {viewing && image && (
+        <div onClick={() => setViewing(false)} className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 animate-fade-in">
+          <img src={image} alt="Borrower ID" onClick={e => e.stopPropagation()} className="max-h-[85vh] max-w-full rounded-xl shadow-2xl" />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -844,6 +910,16 @@ function App() {
     if (!confirm(`Delete loan ${ref || id}? This also removes all its payments.`)) return;
     try { await api.deleteLoan(id); await refresh(); flash(`Deleted ${ref || ""}`.trim()); }
     catch (e) { console.error(e); flash("Delete failed — check connection."); }
+  };
+
+  const saveIdImage = async (loan, dataUrl) => {
+    try { await api.setIdImage(loan.id, dataUrl); await refresh(); flash(`ID photo saved — ${loan.borrower}`); }
+    catch (e) { console.error(e); flash("Upload failed — check connection."); }
+  };
+  const removeIdImage = async (loan) => {
+    if (!confirm(`Remove the ID photo for ${loan.borrower}?`)) return;
+    try { await api.setIdImage(loan.id, null); await refresh(); flash("ID photo removed"); }
+    catch (e) { console.error(e); flash("Remove failed — check connection."); }
   };
 
   // One-time migration of any pre-Supabase localStorage data into the cloud.
@@ -1318,6 +1394,7 @@ function App() {
                     <button onClick={() => deleteLoan(l.id, l.ref)} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Delete</button>
                   </div>
                   <button onClick={() => { setAgreementLoanId(l.id); setTab("agreement"); }} className="w-full py-2.5 rounded-xl border border-emerald-300 active:bg-emerald-50 text-emerald-700 text-sm font-semibold transition">📄 Loan Agreement</button>
+                  <IdPhotoButton image={l.idImage} onUpload={d => saveIdImage(l, d)} onRemove={() => removeIdImage(l)} />
                 </div>
               );
             })}
