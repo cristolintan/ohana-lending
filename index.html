@@ -15,13 +15,26 @@
   <link rel="manifest" href="manifest.json" />
   <meta name="theme-color" content="#047857" />
 
-  <!-- Tailwind (CDN — no build needed) -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind (vendored locally — no CDN / no cross-origin request) -->
+  <script src="./tailwindcss.js"></script>
 
   <!-- React + Babel (no build step needed) -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
+  <!--
+    Force the CLASSIC JSX runtime. Newer @babel/standalone defaults JSX to the
+    "automatic" runtime, which compiles to `import { jsx } from "react/jsx-runtime"`.
+    That bare ES import is fatal here (no bundler; React loads as a UMD global) and
+    leaves the page blank. Registering a classic preset and using it via
+    data-presets="react-classic" on the app script keeps output as React.createElement.
+    Must run before Babel auto-transforms <script type="text/babel"> tags on DOMContentLoaded.
+  -->
+  <script>
+    Babel.registerPreset("react-classic", {
+      presets: [[Babel.availablePresets["react"], { runtime: "classic" }]]
+    });
+  </script>
 
   <!-- Lucide icons -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
@@ -87,7 +100,7 @@
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel" src="app.js"></script>
+  <script type="text/babel" data-presets="react-classic" src="app.js"></script>
   <script>
     // Register service worker
     if ('serviceWorker' in navigator) {
