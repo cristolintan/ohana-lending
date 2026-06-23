@@ -586,7 +586,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
         <h1 className="text-center font-bold text-lg">LOAN AGREEMENT</h1>
         <div className="h-4"></div>
         <p>This Loan Agreement is made and entered into this {fmtDate(aDate)}, by and between:</p>
-        <p><b>{f.lenderName || "_____"}</b>, of legal age, Filipino, residing at {f.lenderAddress || "_____"}, holding Government ID No. {f.lenderId || "_____"}, hereinafter referred to as the "<i>Lender</i>",</p>
+        <p><b>{f.lenderName || "_____"}</b>, of legal age, Filipino{f.lenderAddress && <>, residing at {f.lenderAddress}</>}{f.lenderId && <>, holding Government ID No. {f.lenderId}</>}, hereinafter referred to as the "<i>Lender</i>",</p>
         <p>and</p>
         <p><b>{loan.borrower}</b>, of legal age, Filipino, residing at {f.borrowerAddress || "_____"}, holding Government ID No. {f.borrowerId || "_____"}, hereinafter referred to as the "<i>Borrower</i>".</p>
 
