@@ -1,20 +1,20 @@
 // sw.js — Ohana Lending PWA service worker
 // Relative asset paths so it works whether the app is served from "/"
 // (local dev) or a subpath like "/ohana-lending/" (GitHub Pages).
-const CACHE = "ohana-v10";
+const CACHE = "ohana-v12";
 
 const ASSETS = [
   "./",
   "./index.html",
   "./app.js",
   "./manifest.json",
+  "./tailwindcss.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   // CDN deps (versioned URLs → safe to cache-first forever)
-  "https://cdn.tailwindcss.com",
   "https://unpkg.com/react@18/umd/react.production.min.js",
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
-  "https://unpkg.com/@babel/standalone/babel.min.js",
+  "https://unpkg.com/@babel/standalone@7.29.7/babel.min.js",
   "https://unpkg.com/lucide@latest/dist/umd/lucide.min.js",
   "https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js",
   "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js",
