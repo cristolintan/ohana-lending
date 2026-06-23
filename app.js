@@ -284,7 +284,7 @@ const txDir = cat => { const f = TX_TYPES.find(t => t[0] === cat); return f ? f[
 
 // ─── Tiny components ─────────────────────────────────────────────────────────
 const inputCls = "w-full px-3 py-2.5 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none text-slate-800 bg-white text-sm";
-const labelCls = "block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wide";
+const labelCls = "block text-s font-semibold text-slate-500 mb-1.5 uppercase tracking-wide";
 
 function Stat({ label, value, tone, small }) {
   const tones = {
@@ -296,7 +296,7 @@ function Stat({ label, value, tone, small }) {
   };
   return (
     <div className={`rounded-2xl p-3.5 ${tones[tone]}`}>
-      <p className="text-xs font-semibold uppercase tracking-wide opacity-60">{label}</p>
+      <p className="text-s font-semibold uppercase tracking-wide opacity-60">{label}</p>
       <p className={`font-bold mt-0.5 ${small ? "text-sm" : "text-lg"}`}>{value}</p>
     </div>
   );
@@ -311,7 +311,7 @@ function Badge({ s }) {
     "FULLY PAID": "bg-emerald-100 text-emerald-700",
     "ACTIVE BALANCE": "bg-amber-100 text-amber-700"
   };
-  return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${map[s] || "bg-slate-100"}`}>{s}</span>;
+  return <span className={`px-2 py-0.5 rounded-full text-s font-semibold ${map[s] || "bg-slate-100"}`}>{s}</span>;
 }
 
 function Toast({ msg }) {
@@ -458,15 +458,15 @@ function SignatureField({ label, value, onChange }) {
     <div>
       <div className="flex items-center justify-between mb-1">
         <label className={labelCls}>{label}</label>
-        {value && <button type="button" onClick={() => onChange("")} className="text-xs text-red-400 font-semibold">Remove</button>}
+        {value && <button type="button" onClick={() => onChange("")} className="text-s text-red-400 font-semibold">Remove</button>}
       </div>
       <div className="flex items-stretch gap-3">
         <div className="flex-1 h-20 rounded-xl border border-slate-300 bg-white flex items-center justify-center overflow-hidden">
-          {value ? <img src={value} alt="" className="max-h-20" /> : <span className="text-xs text-slate-300">No signature</span>}
+          {value ? <img src={value} alt="" className="max-h-20" /> : <span className="text-s text-slate-300">No signature</span>}
         </div>
         <div className="flex flex-col gap-2 justify-center">
-          <button type="button" onClick={() => setOpen(true)} className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-semibold">✍ Draw</button>
-          <button type="button" onClick={() => fileRef.current && fileRef.current.click()} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold">⬆ Upload</button>
+          <button type="button" onClick={() => setOpen(true)} className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-s font-semibold">✍ Draw</button>
+          <button type="button" onClick={() => fileRef.current && fileRef.current.click()} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-s font-semibold">⬆ Upload</button>
           <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onFile} />
         </div>
       </div>
@@ -541,7 +541,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
     <div className="text-center">
       <div className="h-16 flex items-end justify-center">{src ? <img src={src} alt="" className="max-h-16" /> : null}</div>
       <div className="border-t border-slate-800 pt-1 font-bold">{name || " "}</div>
-      <div className="text-xs italic text-slate-600">{role}</div>
+      <div className="text-s italic text-slate-600">{role}</div>
     </div>
   );
   const H = ({ children }) => <h2 className="font-bold pt-3">{children}</h2>;
@@ -573,7 +573,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
       <div className="no-print bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
         <p className="font-bold text-slate-700">Signatures</p>
-        <p className="text-xs text-slate-400 -mt-2">Tap Draw to sign in a popup, or Upload an image — saved with the agreement.</p>
+        <p className="text-s text-slate-400 -mt-2">Tap Draw to sign in a popup, or Upload an image — saved with the agreement.</p>
         <SignatureField label="Lender Signature" value={f.sigLender} onChange={v => set("sigLender", v)} />
         <SignatureField label="Borrower Signature" value={f.sigBorrower} onChange={v => set("sigBorrower", v)} />
         <SignatureField label="Guarantor Signature" value={f.sigGuarantor} onChange={v => set("sigGuarantor", v)} />
@@ -613,7 +613,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
         <H>REPAYMENT TERMS AND SPECIAL CONDITION</H>
         <p>a. The Borrower shall repay the Loan in {loan.terms} installments in the amounts reflected in the payment schedule below, beginning {firstDue}, and ending {lastDue}.</p>
         <p>b. Payments shall be made on or before the due dates indicated in the payment schedule.</p>
-        <table className="w-full text-xs border border-slate-400 mt-2">
+        <table className="w-full text-s border border-slate-400 mt-2">
           <thead><tr className="bg-slate-100">
             <th className="border border-slate-400 px-2 py-1 text-left">#</th>
             <th className="border border-slate-400 px-2 py-1 text-left">Principal</th>
@@ -1146,7 +1146,7 @@ function App() {
           <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center font-bold text-sm">OLC</div>
           <div>
             <p className="font-bold text-sm leading-tight">JAVILAT LENDING CORPORATION</p>
-            <p className="text-emerald-200 text-xs">{loading ? "Connecting…" : `☁ ${db.loans.length} loans`}</p>
+            <p className="text-emerald-200 text-s">{loading ? "Connecting…" : `☁ ${db.loans.length} loans`}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1154,8 +1154,8 @@ function App() {
             <option value="PHP">₱ Peso</option>
             <option value="USD">$ Dollar</option>
           </select>
-          {isAdmin && <button onClick={openAdmin} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-xs font-semibold">Admin</button>}
-          {session && !session.user.is_anonymous && <button onClick={signOut} title={session.user.email} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-xs font-semibold">Sign out</button>}
+          {isAdmin && <button onClick={openAdmin} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-s font-semibold">Admin</button>}
+          {session && !session.user.is_anonymous && <button onClick={signOut} title={session.user.email} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-s font-semibold">Sign out</button>}
         </div>
       </header>
 
@@ -1217,12 +1217,12 @@ function App() {
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
                 <div>
                   <p className="font-bold text-slate-700">Projected Schedule</p>
-                  <p className="text-xs text-slate-500">{name.trim() || "Unnamed"}</p>
+                  <p className="text-s text-slate-500">{name.trim() || "Unnamed"}</p>
                 </div>
-                <button onClick={exportSchedulePng} className="no-capture px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold active:bg-slate-100 transition">⬇ Export Table</button>
+                <button onClick={exportSchedulePng} className="no-capture px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-s font-semibold active:bg-slate-100 transition">⬇ Export Table</button>
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full text-xs">
+                <table className="w-full text-s">
                   <thead><tr className="bg-slate-100 text-slate-500">
                     {["#","Remaining","Principal","Interest","Total","Due"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
                   </tr></thead>
@@ -1237,7 +1237,7 @@ function App() {
                         <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(r.due)}</td>
                       </tr>
                     ))}
-                    <tr className="bg-emerald-50 border-t-2 border-emerald-200 font-bold text-xs">
+                    <tr className="bg-emerald-50 border-t-2 border-emerald-200 font-bold text-s">
                       <td className="px-3 py-2">Total</td><td></td>
                       <td className="px-3 py-2 text-teal-700">{fmt(amount)}</td>
                       <td className="px-3 py-2 text-amber-700">{fmt(calc.totalInterest)}</td>
@@ -1265,7 +1265,7 @@ function App() {
               <p className="font-bold text-slate-700">{db.loans.length} Loan{db.loans.length !== 1 ? "s" : ""}</p>
               <button onClick={() => setTab("new")} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New</button>
             </div>
-            {canImport && <button onClick={importLocal} className="w-full py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-xs font-semibold active:bg-amber-100 transition">⤓ Import {localBackup.loans.length} loan(s) saved on this device</button>}
+            {canImport && <button onClick={importLocal} className="w-full py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-s font-semibold active:bg-amber-100 transition">⤓ Import {localBackup.loans.length} loan(s) saved on this device</button>}
             {db.loans.length > 0 && (
               <div className="grid grid-cols-2 gap-3">
                 <Stat label="Outstanding" value={fmt(portfolio.outstanding)} tone="amber" />
@@ -1277,7 +1277,7 @@ function App() {
             {db.loans.length > 0 && (
               <div className="flex gap-2">
                 {[["active", "Active"], ["all", "All"], ["paid", "Fully Paid"]].map(([k, lbl]) => (
-                  <button key={k} onClick={() => setRecordFilter(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${recordFilter === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>
+                  <button key={k} onClick={() => setRecordFilter(k)} className={`flex-1 py-2 rounded-xl text-s font-semibold transition ${recordFilter === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>
                     {lbl} ({k === "all" ? db.loans.length : k === "active" ? portfolio.active : db.loans.length - portfolio.active})
                   </button>
                 ))}
@@ -1298,16 +1298,16 @@ function App() {
                 <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-2 animate-fade-up">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <p className="text-xs text-emerald-600 font-semibold">{l.ref || l.id}</p>
+                      <p className="text-s text-emerald-600 font-semibold">{l.ref || l.id}</p>
                       <p className="font-bold">{l.borrower}</p>
-                      <p className="text-xs text-slate-500">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
+                      <p className="text-s text-slate-500">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       {isOverdue && <Badge s="OVERDUE" />}
                       <Badge s={s.overallStatus} />
                     </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div className="grid grid-cols-3 gap-2 text-s">
                     <div className="bg-slate-50 rounded-lg p-2"><p className="text-slate-400">Amount</p><p className="font-bold">{fmt(l.amount)}</p></div>
                     <div className="bg-emerald-50 rounded-lg p-2"><p className="text-slate-400">Paid</p><p className="font-bold text-emerald-700">{fmt(s.totalLogged)}</p></div>
                     <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
@@ -1347,9 +1347,9 @@ function App() {
           {resolved.loan && statusData && (<>
             <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex items-center justify-between gap-2">
               <div>
-                <p className="text-xs text-emerald-600 font-semibold">{resolved.loan.ref || resolved.loan.id}</p>
+                <p className="text-s text-emerald-600 font-semibold">{resolved.loan.ref || resolved.loan.id}</p>
                 <p className="font-bold">{resolved.loan.borrower}</p>
-                <p className="text-xs text-slate-500">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
+                <p className="text-s text-slate-500">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
               </div>
               <Badge s={statusData.overallStatus} />
             </div>
@@ -1357,7 +1357,7 @@ function App() {
             {/* Revise remaining schedule (frequency and/or terms) */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
               <p className="font-bold text-slate-700">Revise Remaining Schedule</p>
-              <p className="text-xs text-slate-500">
+              <p className="text-s text-slate-500">
                 Current: {resolved.loan.frequency} · {resolved.loan.terms} terms
                 {resolved.loan.freqChange && <> → <span className="font-semibold text-emerald-700">{resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? `, ${resolved.loan.freqChange.terms} installments` : ""}</span> from {fmtDate(parseDate(resolved.loan.freqChange.date))}</>}
               </p>
@@ -1390,7 +1390,7 @@ function App() {
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <p className="px-4 py-3 font-bold text-slate-700 border-b border-slate-100">Schedule & Status</p>
               <div className="overflow-x-auto">
-                <table className="w-full text-xs">
+                <table className="w-full text-s">
                   <thead><tr className="bg-slate-100 text-slate-500">
                     {["#","Principal","Interest","Total","Due","Status","Left"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
                   </tr></thead>
@@ -1406,7 +1406,7 @@ function App() {
                         <td className="px-3 py-2">{fmt(r.amtLeft)}</td>
                       </tr>
                     ))}
-                    <tr className="bg-emerald-50 border-t-2 border-emerald-200 font-bold text-xs">
+                    <tr className="bg-emerald-50 border-t-2 border-emerald-200 font-bold text-s">
                       <td className="px-3 py-2">Total</td>
                       <td className="px-3 py-2 text-teal-700">{fmt(resolved.loan.amount)}</td>
                       <td className="px-3 py-2 text-amber-700">{fmt(statusData.summedInterest)}</td>
@@ -1447,7 +1447,7 @@ function App() {
               {loanPayments.length > 0 && (
                 <div className="space-y-1.5 pt-1">
                   {loanPayments.map(p => (
-                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-s">
                       <span className="font-semibold">{fmt(p.amount)}</span>
                       <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
                       <button onClick={() => deletePayment(p.id)} className="text-red-400 pl-2 text-base leading-none">×</button>
@@ -1474,15 +1474,15 @@ function App() {
             <p className="font-bold text-slate-700">Cash Flow</p>
             <div className="flex gap-2">
               {[["all", "All"], ["month", "This Month"], ["30d", "30 Days"], ["year", "This Year"]].map(([k, lbl]) => (
-                <button key={k} onClick={() => setCfRange(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfRange === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
+                <button key={k} onClick={() => setCfRange(k)} className={`flex-1 py-2 rounded-xl text-s font-semibold transition ${cfRange === k ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
               ))}
             </div>
             <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide flex-1">Opening Balance</label>
+              <label className="text-s font-semibold text-slate-500 uppercase tracking-wide flex-1">Opening Balance</label>
               <input type="number" inputMode="decimal" value={openingInput} onChange={e => setOpeningInput(e.target.value)} onBlur={commitOpening} placeholder="0.00" className="w-32 px-3 py-2 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none text-sm text-right text-slate-800 bg-white" />
             </div>
-            <button onClick={() => setCfProjected(v => !v)} className={`w-full py-2 rounded-xl text-xs font-semibold transition ${cfProjected ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{cfProjected ? "✓ Showing projected dues" : "Show projected dues"}</button>
-            {cfProjected && <p className="text-xs text-slate-400">Expected upcoming: <span className="font-semibold text-emerald-700">{fmt(cashflow.expected)}</span> across {cashflow.expectedCount} due{cashflow.expectedCount !== 1 ? "s" : ""}.</p>}
+            <button onClick={() => setCfProjected(v => !v)} className={`w-full py-2 rounded-xl text-s font-semibold transition ${cfProjected ? "bg-emerald-600 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{cfProjected ? "✓ Showing projected dues" : "Show projected dues"}</button>
+            {cfProjected && <p className="text-s text-slate-400">Expected upcoming: <span className="font-semibold text-emerald-700">{fmt(cashflow.expected)}</span> across {cashflow.expectedCount} due{cashflow.expectedCount !== 1 ? "s" : ""}.</p>}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -1495,7 +1495,7 @@ function App() {
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
               <p className="font-bold text-slate-700">Inflow vs Outflow</p>
-              <div className="flex gap-3 text-xs text-slate-500">
+              <div className="flex gap-3 text-s text-slate-500">
                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#10b981" }} />In</span>
                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#fbbf24" }} />Out</span>
               </div>
@@ -1533,10 +1533,10 @@ function App() {
                 <input className={inputCls} value={txNote} onChange={e => setTxNote(e.target.value)} placeholder="Optional" />
               </div>
             </div>
-            <p className="text-xs text-slate-400">{txDir(txCat) === "in" ? "↑ Adds to cash (inflow)" : "↓ Reduces cash (outflow)"}</p>
+            <p className="text-s text-slate-400">{txDir(txCat) === "in" ? "↑ Adds to cash (inflow)" : "↓ Reduces cash (outflow)"}</p>
             <button onClick={addTransaction} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Add Entry</button>
             {(db.transactions || []).filter(t => { const [s, e] = rangeBounds(cfRange); return t.date >= s && t.date <= e; }).sort((a, b) => a.date < b.date ? 1 : -1).map(t => (
-              <div key={t.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+              <div key={t.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-s">
                 <div className="min-w-0">
                   <span className={`font-semibold ${t.direction === "in" ? "text-emerald-700" : "text-amber-700"}`}>{t.direction === "in" ? "+" : "−"}{fmt(t.amount)}</span>
                   <span className="text-slate-500"> · {t.kind}{t.note ? ` · ${t.note}` : ""}</span>
@@ -1554,13 +1554,13 @@ function App() {
 
              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
               <p className="font-bold text-slate-700">Ledger</p>
-              {cashflow.ledger.length > 0 && <button onClick={exportCsv} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold active:bg-slate-100 transition">⬇ CSV</button>}
+              {cashflow.ledger.length > 0 && <button onClick={exportCsv} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-s font-semibold active:bg-slate-100 transition">⬇ CSV</button>}
             </div>
              
               <div className="bg-white rounded-2xl  p-4 space-y-3 shadow-sm">
             <div className="flex gap-2">
               {[["all", "All"], ["in", "Inflow"], ["out", "Outflow"]].map(([k, lbl]) => (
-                <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-2 rounded-xl text-xs font-semibold transition ${cfDir === k ? "bg-slate-800 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
+                <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-2 rounded-xl text-s font-semibold transition ${cfDir === k ? "bg-slate-800 text-white shadow-sm" : "bg-white border border-slate-200 text-slate-500 active:bg-slate-100"}`}>{lbl}</button>
               ))}
             </div>
             </div>
@@ -1570,7 +1570,7 @@ function App() {
               <div className="p-8 text-center text-slate-400 text-sm">No cash flow activity in this range.</div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-xs">
+                <table className="w-full text-s">
                   <thead><tr className="bg-slate-100 text-slate-500">
                     {["Date", "Details", "In", "Out", "Balance"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
                   </tr></thead>
@@ -1608,7 +1608,7 @@ function App() {
       {/* Bottom Tab Bar (iOS-style) */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur border-t border-slate-200 flex z-20" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
         {navItems.map(({ id, label, icon }) => (
-          <button key={id} onClick={() => setTab(id)} className={`flex-1 flex flex-col items-center py-3 gap-0.5 text-xs font-medium transition-colors active:bg-slate-100 ${tab === id ? "text-emerald-600" : "text-slate-400"}`}>
+          <button key={id} onClick={() => setTab(id)} className={`flex-1 flex flex-col items-center py-3 gap-0.5 text-s font-medium transition-colors active:bg-slate-100 ${tab === id ? "text-emerald-600" : "text-slate-400"}`}>
             <i data-lucide={icon} className="w-5 h-5" style={{ strokeWidth: tab === id ? 2.5 : 1.8 }}></i>
             {label}
           </button>
@@ -1621,13 +1621,13 @@ function App() {
             <div className="text-center space-y-1">
               <div className="w-12 h-12 mx-auto rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold">OLC</div>
               <p className="font-bold text-slate-800">JAVILAT LENDING</p>
-              <p className="text-xs text-slate-400">{session && !session.user.is_anonymous ? "Account access" : "Sign in to access records"}</p>
+              <p className="text-s text-slate-400">{session && !session.user.is_anonymous ? "Account access" : "Sign in to access records"}</p>
             </div>
             {!authReady ? (
               <p className="text-center text-sm text-slate-400 py-4">Loading…</p>
             ) : (session && !session.user.is_anonymous && !approved) ? (<>
               <p className="text-sm text-slate-600 text-center">Your account <b className="text-slate-800">{session.user.email}</b> is pending administrator approval.</p>
-              <p className="text-xs text-slate-400 text-center">Ask the administrator to grant your email access, then reload.</p>
+              <p className="text-s text-slate-400 text-center">Ask the administrator to grant your email access, then reload.</p>
               <button onClick={signOut} className="w-full py-2.5 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Sign out</button>
             </>) : (<>
               <div>
@@ -1638,7 +1638,7 @@ function App() {
                 <label className={labelCls}>Password</label>
                 <input type="password" autoComplete="current-password" className={inputCls} value={authPass} onChange={e => setAuthPass(e.target.value)} placeholder="••••••••" onKeyDown={e => { if (e.key === "Enter") signIn(); }} />
               </div>
-              {authMsg && <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{authMsg}</p>}
+              {authMsg && <p className="text-s text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{authMsg}</p>}
               <button disabled={authBusy} onClick={signIn} className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm disabled:opacity-50 transition">{authBusy ? "Please wait…" : "Sign in"}</button>
               <button disabled={authBusy} onClick={createAccount} className="w-full py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold disabled:opacity-50 active:bg-slate-100 transition">Create account</button>
             </>)}
@@ -1660,9 +1660,9 @@ function App() {
 
             {adminPending.length > 0 && (
               <div className="space-y-1.5">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Pending sign-ups</p>
+                <p className="text-s font-semibold text-slate-500 uppercase tracking-wide">Pending sign-ups</p>
                 {adminPending.map(u => (
-                  <div key={u.email} className="flex items-center justify-between bg-amber-50 rounded-xl px-3 py-2 text-xs gap-2">
+                  <div key={u.email} className="flex items-center justify-between bg-amber-50 rounded-xl px-3 py-2 text-s gap-2">
                     <span className="text-slate-700 truncate">{u.email}</span>
                     <button onClick={() => approveEmail(u.email)} className="px-3 py-1 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white font-semibold shrink-0">Approve</button>
                   </div>
@@ -1671,9 +1671,9 @@ function App() {
             )}
 
             <div className="space-y-1.5">
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Approved users</p>
-              {adminUsers.length === 0 ? <p className="text-xs text-slate-400">No one yet.</p> : adminUsers.map(u => (
-                <div key={u.email} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs gap-2">
+              <p className="text-s font-semibold text-slate-500 uppercase tracking-wide">Approved users</p>
+              {adminUsers.length === 0 ? <p className="text-s text-slate-400">No one yet.</p> : adminUsers.map(u => (
+                <div key={u.email} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-s gap-2">
                   <span className="text-slate-700 truncate">{u.email}{u.role === "admin" ? " · admin" : ""}</span>
                   <button onClick={() => revokeEmail(u.email)} className="text-red-500 font-semibold pl-2 shrink-0">Remove</button>
                 </div>
