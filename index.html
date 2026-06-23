@@ -36,6 +36,7 @@
   <style>
     /* Safe area insets for iPhone notch / home bar */
     body {
+      font-family: sans-serif, Arial, Helvetica;
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
       background: #f8fafc;
@@ -71,12 +72,12 @@
       }
     }
     /* Print: show only the loan agreement document */
-    @page { margin: 1.5cm; }
+    @page { margin: 2.54cm; }   /* 1 inch — standard for contracts */
     @media print {
       body * { visibility: hidden !important; }
       #agreement-print, #agreement-print * { visibility: visible !important; }
       #agreement-print {
-        position: absolute; left: 10px; right: 10px; top: 0; margin: 0 !important;
+        position: absolute; left: 0; right: 0; top: 0; margin: 0 !important;
         border: none !important; box-shadow: none !important; border-radius: 0 !important;
         -webkit-print-color-adjust: exact; print-color-adjust: exact;
       }
