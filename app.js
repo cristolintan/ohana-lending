@@ -1093,7 +1093,7 @@ function App() {
     const amt = Number(payAmount);
     if (!(amt > 0)) { flash("Enter a payment amount."); return; }
     if (!payDate) { flash("Pick a payment date."); return; }
-    if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
+    //if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
     try {
       await api.addPayment({ loanId: resolved.loan.id, date: payDate, amount: amt, type: payType });
       await refresh();
