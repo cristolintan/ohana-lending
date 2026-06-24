@@ -485,6 +485,14 @@ function IdPhotoButton({ image, onUpload, onRemove }) {
   const [viewing, setViewing] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Let the hardware/keyboard Escape close the full-screen viewer too.
+  useEffect(() => {
+    if (!viewing) return;
+    const onKey = e => { if (e.key === "Escape") setViewing(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewing]);
+
   const pick = () => fileRef.current && fileRef.current.click();
 
   const onFile = e => {
@@ -533,8 +541,12 @@ function IdPhotoButton({ image, onUpload, onRemove }) {
         </>}</button>
       )}
       {viewing && image && (
-        <div onClick={() => setViewing(false)} className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 animate-fade-in">
-          <img src={image} alt="Borrower ID" onClick={e => e.stopPropagation()} className="max-h-[85vh] max-w-full rounded-xl shadow-2xl" />
+        <div onClick={() => setViewing(false)} className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4 animate-fade-in">
+          <button type="button" onClick={() => setViewing(false)} aria-label="Close"
+            className="fixed right-4 h-11 w-11 rounded-full bg-white/15 text-white text-2xl leading-none flex items-center justify-center active:bg-white/30 backdrop-blur"
+            style={{ top: "calc(env(safe-area-inset-top) + 1rem)" }}>✕</button>
+          <img src={image} alt="Borrower ID" className="max-h-[80vh] max-w-full rounded-xl shadow-2xl" />
+          <p className="mt-4 text-white/70 text-s">Tap anywhere or ✕ to close</p>
         </div>
       )}
     </>
