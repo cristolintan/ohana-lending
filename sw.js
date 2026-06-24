@@ -1,7 +1,7 @@
 // sw.js — Ohana Lending PWA service worker
 // Relative asset paths so it works whether the app is served from "/"
 // (local dev) or a subpath like "/ohana-lending/" (GitHub Pages).
-const CACHE = "ohana-v12";
+const CACHE = "ohana-v13";
 
 const ASSETS = [
   "./",
@@ -18,6 +18,7 @@ const ASSETS = [
   "https://unpkg.com/lucide@latest/dist/umd/lucide.min.js",
   "https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js",
   "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js",
+  "https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"
 ];
 
