@@ -350,35 +350,77 @@ function MiniBars({ data, fmt }) {
   );
 }
 
-function MiniLine({ data, fmt }) {
-  if (!data.length) return <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>;
-  const W = 320, H = 140, pad = 10;
-  const vals = data.map(d => d.netBalance);
-  const min = Math.min(0, ...vals), max = Math.max(0, ...vals), range = (max - min) || 1;
-  const n = data.length;
-  const X = i => n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad);
-  const Y = v => pad + (1 - (v - min) / range) * (H - 2 * pad);
-  const C = data.map((d, i) => ({ x: X(i), y: Y(d.netBalance), projected: d.projected, label: d.label, val: d.netBalance }));
-  const fp = C.findIndex(c => c.projected);
-  const solidC = fp === -1 ? C : C.slice(0, fp);
-  const dashC = fp === -1 ? [] : C.slice(Math.max(0, fp - 1));
-  const pts = arr => arr.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-  const area = `${C[0].x.toFixed(1)},${(H - pad).toFixed(1)} ${pts(C)} ${C[n - 1].x.toFixed(1)},${(H - pad).toFixed(1)}`;
-  const zeroY = Y(0);
+// Net Cash Position — TradingView Lightweight Charts v5 Baseline series.
+// Baseline is the opening balance: cash above it fills green, below it fills red.
+// Projected dues simply continue the same baseline line (no separate forecast series).
+// Pan + zoom (drag, wheel, pinch) are enabled like a full exchange chart.
+// `data` is [{ time:'YYYY-MM-DD', value, projected }] sorted asc.
+function PositionChart({ data, fmt, baseline }) {
+  const wrapRef = useRef(null);
+  const tipRef = useRef(null);
+  const chartRef = useRef(null);
+  const baseRef = useRef(null);
+
+  // Create the chart + series exactly once.
+  useEffect(() => {
+    const LWC = window.LightweightCharts;
+    if (!LWC || !wrapRef.current) return;
+    const chart = LWC.createChart(wrapRef.current, {
+      autoSize: true,
+      layout: { background: { color: "transparent" }, textColor: "#94a3b8", attributionLogo: false },
+      grid: { vertLines: { visible: false }, horzLines: { color: "#f1f5f9" } },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.18, bottom: 0.12 } },
+      timeScale: { borderVisible: false, rightOffset: 4 },
+      // handleScale / handleScroll left at their defaults → full pan + zoom.
+      crosshair: {
+        vertLine: { color: "#94a3b8", width: 1, style: LWC.LineStyle.Dashed, labelVisible: false },
+        horzLine: { color: "#94a3b8", width: 1, style: LWC.LineStyle.Dashed, labelBackgroundColor: "#475569" },
+      },
+      localization: { priceFormatter: p => fmt(p) },
+    });
+    const base = chart.addSeries(LWC.BaselineSeries, {
+      baseValue: { type: "price", price: baseline || 0 },
+      topLineColor: "#059669", topFillColor1: "rgba(16,185,129,0.35)", topFillColor2: "rgba(16,185,129,0.02)",
+      bottomLineColor: "#dc2626", bottomFillColor1: "rgba(239,68,68,0.02)", bottomFillColor2: "rgba(239,68,68,0.35)",
+      lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+    });
+    chartRef.current = chart; baseRef.current = base;
+
+    chart.subscribeCrosshairMove(param => {
+      const tip = tipRef.current; if (!tip) return;
+      const pt = param.point;
+      if (!param.time || !pt || pt.x < 0 || pt.y < 0) { tip.style.opacity = "0"; return; }
+      const d = param.seriesData.get(base);
+      if (!d || d.value === undefined) { tip.style.opacity = "0"; return; }
+      const t = param.time;
+      const dt = typeof t === "object" ? new Date(t.year, t.month - 1, t.day) : new Date(t + "T00:00:00");
+      tip.querySelector("[data-date]").textContent = dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      tip.querySelector("[data-val]").textContent = fmt(d.value);
+      const w = wrapRef.current.clientWidth;
+      tip.style.opacity = "1";
+      tip.style.left = Math.min(Math.max(pt.x, 52), w - 52) + "px";
+    });
+
+    return () => { chart.remove(); chartRef.current = baseRef.current = null; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Push data + keep the baseline pinned to the opening balance on every change.
+  React.useEffect(() => {
+    const base = baseRef.current, chart = chartRef.current;
+    if (!base || !chart) return;
+    base.applyOptions({ baseValue: { type: "price", price: baseline || 0 } });
+    base.setData(data.map(d => ({ time: d.time, value: d.value }))); // actuals + projected, one line
+    chart.timeScale().fitContent();
+  }, [data, baseline]);
+
   return (
     <div className="px-4 pb-3 pt-2">
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" className="block">
-        <polygon points={area} fill="#10b98122" />
-        {min < 0 && <line x1="0" y1={zeroY} x2={W} y2={zeroY} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="4 3" />}
-        {solidC.length > 1 && <polyline points={pts(solidC)} fill="none" stroke="#059669" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />}
-        {dashC.length > 1 && <polyline points={pts(dashC)} fill="none" stroke="#059669" strokeWidth="2" strokeDasharray="5 4" strokeLinejoin="round" strokeLinecap="round" />}
-        {C.map((c, i) => (
-          <circle key={i} cx={c.x} cy={c.y} r="2.5" fill={c.projected ? "#6ee7b7" : "#059669"}><title>{c.label}: {fmt(c.val)}</title></circle>
-        ))}
-      </svg>
-      <div className="flex justify-between text-[10px] text-slate-400 mt-1">
-        <span>{data[0].label}</span>
-        <span>{data[n - 1].label}</span>
+      <div className="relative">
+        <div ref={wrapRef} style={{ width: "100%", height: 190 }} />
+        <div ref={tipRef} className="absolute top-1 -translate-x-1/2 pointer-events-none bg-white/95 border border-slate-200 shadow-lg rounded-lg px-2.5 py-1.5 whitespace-nowrap transition-opacity" style={{ opacity: 0, left: 0 }}>
+          <div data-date className="text-slate-400 text-[10px] leading-tight"></div>
+          <div data-val className="font-bold text-emerald-700 text-sm leading-tight"></div>
+        </div>
       </div>
     </div>
   );
@@ -485,6 +527,14 @@ function IdPhotoButton({ image, onUpload, onRemove }) {
   const [viewing, setViewing] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Let the hardware/keyboard Escape close the full-screen viewer too.
+  useEffect(() => {
+    if (!viewing) return;
+    const onKey = e => { if (e.key === "Escape") setViewing(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewing]);
+
   const pick = () => fileRef.current && fileRef.current.click();
 
   const onFile = e => {
@@ -533,8 +583,12 @@ function IdPhotoButton({ image, onUpload, onRemove }) {
         </>}</button>
       )}
       {viewing && image && (
-        <div onClick={() => setViewing(false)} className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 animate-fade-in">
-          <img src={image} alt="Borrower ID" onClick={e => e.stopPropagation()} className="max-h-[85vh] max-w-full rounded-xl shadow-2xl" />
+        <div onClick={() => setViewing(false)} className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4 animate-fade-in">
+          <button type="button" onClick={() => setViewing(false)} aria-label="Close"
+            className="fixed right-4 h-11 w-11 rounded-full bg-white/15 text-white text-2xl leading-none flex items-center justify-center active:bg-white/30 backdrop-blur"
+            style={{ top: "calc(env(safe-area-inset-top) + 1rem)" }}>✕</button>
+          <img src={image} alt="Borrower ID" className="max-h-[80vh] max-w-full rounded-xl shadow-2xl" />
+          <p className="mt-4 text-white/70 text-s">Tap anywhere or ✕ to close</p>
         </div>
       )}
     </>
@@ -784,7 +838,6 @@ function App() {
   const [adminEmail, setAdminEmail] = useState("");
   const [adminBusy, setAdminBusy] = useState(false);
   const [tab, setTab] = useState("new");
-  const [currency, setCurrency] = useState("PHP");
   const [toast, setToast] = useState("");
   const [agreementLoanId, setAgreementLoanId] = useState(null);
   const [recordFilter, setRecordFilter] = useState("active");
@@ -848,7 +901,7 @@ function App() {
     return () => { mounted = false; subscription.unsubscribe(); };
   }, [loadShared]);
 
-  const sym = currency === "PHP" ? "₱" : "$";
+  const sym = "₱";
   const fmt = v => sym + Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const calc = useMemo(() => computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }), [amount, terms, flatRate, frequency, startDate, dropRate]);
@@ -1087,17 +1140,15 @@ function App() {
     });
     const months = Object.values(mMap).sort((a, b) => a.key < b.key ? -1 : 1);
 
-    // Per-transaction running-balance series for the position line (a "Start"
-    // carry-in point keeps the line meaningful even within a single month).
+    // Date-keyed running balance for the Net Cash Position baseline chart.
+    // Collapse multiple events on the same day to that day's closing balance so
+    // each x-axis date carries one value (BaselineSeries needs unique ascending times).
     const hist = [...inRange, ...projected].sort((a, b) => a.seq - b.seq);
-    const series = [];
-    if (hist.length) {
-      const f = hist[0];
-      series.push({ netBalance: f.balance - (f.inflow - f.outflow), label: "Start", projected: false });
-      hist.forEach(t => series.push({ netBalance: t.balance, label: fmtDate(parseDate(t.date)), projected: !!t.projected }));
-    }
+    const posMap = new Map();
+    hist.forEach(t => posMap.set(t.date, { time: t.date, value: t.balance, projected: !!t.projected }));
+    const position = [...posMap.values()].sort((a, b) => a.time < b.time ? -1 : 1);
 
-    return { collected, disbursed, net, interest, expected, expectedCount: projected.length, ledger, months, series, opening, balance: bal };
+    return { collected, disbursed, net, interest, expected, expectedCount: projected.length, ledger, months, position, opening, balance: bal };
   }, [db.loans, db.payments, db.transactions, db.settings, cfRange, cfDir, cfProjected]);
 
   const exportCsv = () => {
@@ -1226,10 +1277,6 @@ function App() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <select className="px-2.5 py-1.5 rounded-lg text-slate-800 text-sm bg-white" value={currency} onChange={e => setCurrency(e.target.value)}>
-            <option value="PHP">₱ Peso</option>
-            <option value="USD">$ Dollar</option>
-          </select>
           {isAdmin && <button onClick={openAdmin} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-s font-semibold">Admin</button>}
           {session && !session.user.is_anonymous && <button onClick={signOut} title={session.user.email} className="px-2.5 py-1.5 rounded-lg bg-white/20 text-white text-s font-semibold">Sign out</button>}
         </div>
@@ -1585,7 +1632,9 @@ function App() {
               <p className="font-bold text-slate-700">Net Cash Position</p>
               <span className={`font-bold text-sm ${cashflow.balance < 0 ? "text-red-600" : "text-emerald-700"}`}>{fmt(cashflow.balance)}</span>
             </div>
-            <MiniLine data={cashflow.series} fmt={fmt} />
+            {cashflow.position.length
+              ? <PositionChart data={cashflow.position} fmt={fmt} baseline={cashflow.opening} />
+              : <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>}
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
