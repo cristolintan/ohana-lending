@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>A little question for you 💌</title>
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#ff7eb3" />
+  <style>
+    :root {
+      --pink:   #ff7eb3;
+      --pink2:  #ff65a3;
+      --soft:   #fff0f6;
+      --text:   #6b2a47;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
+    }
+    body {
+      background: linear-gradient(160deg, #ffe0ec 0%, #ffd1e8 45%, #ffc2dd 100%);
+      color: var(--text);
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* floating hearts in the background */
+    .bg-heart {
+      position: fixed;
+      bottom: -40px;
+      font-size: 26px;
+      opacity: 0.55;
+      animation: floatUp linear infinite;
+      pointer-events: none;
+      z-index: 0;
+    }
+    @keyframes floatUp {
+      0%   { transform: translateY(0) rotate(0deg); opacity: 0; }
+      10%  { opacity: 0.6; }
+      100% { transform: translateY(-115vh) rotate(360deg); opacity: 0; }
+    }
+
+    .card {
+      position: relative;
+      z-index: 2;
+      width: 100%;
+      max-width: 420px;
+      margin: 0 auto;
+      padding: 28px 22px 36px;
+      text-align: center;
+    }
+
+    .bear {
+      font-size: 88px;
+      line-height: 1;
+      display: inline-block;
+      animation: bob 2.4s ease-in-out infinite;
+      filter: drop-shadow(0 8px 14px rgba(214, 51, 108, 0.25));
+    }
+    @keyframes bob {
+      0%, 100% { transform: translateY(0) rotate(-3deg); }
+      50%      { transform: translateY(-10px) rotate(3deg); }
+    }
+
+    h1 {
+      font-size: 30px;
+      margin: 18px 8px 6px;
+      line-height: 1.25;
+      font-weight: 800;
+      color: #d6336c;
+      text-shadow: 0 2px 0 rgba(255,255,255,0.6);
+    }
+    .sub {
+      font-size: 17px;
+      margin: 0 8px 26px;
+      color: #a83a64;
+      font-weight: 500;
+    }
+
+    /* button area */
+    .btns {
+      position: relative;
+      height: 230px;          /* play space so the No button has room to run */
+      margin-top: 6px;
+    }
+    .btn {
+      border: none;
+      border-radius: 999px;
+      font-weight: 800;
+      font-size: 22px;
+      padding: 16px 0;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(214, 51, 108, 0.28);
+      transition: transform 0.12s ease;
+    }
+    .btn:active { transform: scale(0.96); }
+
+    #yes {
+      display: block;
+      width: 70%;
+      max-width: 260px;
+      margin: 8px auto 0;
+      background: linear-gradient(135deg, #ff8fb8, #ff5c97);
+      color: #fff;
+      position: relative;
+      z-index: 3;
+    }
+
+    #no {
+      position: absolute;
+      left: 50%;
+      top: 92px;
+      transform: translateX(-50%);
+      width: 150px;
+      background: #ffffff;
+      color: #c92a6a;
+      border: 2px solid #ffc2dd;
+      z-index: 4;
+      transition: left 0.18s cubic-bezier(.34,1.56,.64,1), top 0.18s cubic-bezier(.34,1.56,.64,1), transform 0.12s ease;
+    }
+
+    /* success screen */
+    #win {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+      background: radial-gradient(circle at 50% 30%, #fff1f6, #ffd1e8 70%);
+    }
+    #win .bear { font-size: 110px; }
+    #win h1 { font-size: 34px; }
+    #win p { font-size: 19px; color: #a83a64; margin: 4px 16px; }
+
+    .confetti {
+      position: fixed;
+      top: -20px;
+      font-size: 20px;
+      z-index: 60;
+      pointer-events: none;
+      animation: fall linear forwards;
+    }
+    @keyframes fall {
+      0%   { transform: translateY(0) rotate(0); opacity: 1; }
+      100% { transform: translateY(110vh) rotate(540deg); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card" id="ask">
+    <div class="bear">🧸</div>
+    <h1 id="title">Will you go out with me?</h1>
+    <p class="sub" id="sub">Pretty please? 🥺💕</p>
+
+    <div class="btns">
+      <button class="btn" id="yes">Yes! 💖</button>
+      <button class="btn" id="no">No</button>
+    </div>
+  </div>
+
+  <div id="win">
+    <div class="bear">🥰</div>
+    <h1>Yayyy!! 🎉</h1>
+    <p>I knew you'd say yes 💕</p>
+    <p>You just made me the happiest 🧸💖</p>
+  </div>
+
+  <script>
+    /* ----- floating background hearts ----- */
+    (function () {
+      const hearts = ['💕','💗','💖','💘','🩷','💞'];
+      for (let i = 0; i < 14; i++) {
+        const h = document.createElement('div');
+        h.className = 'bg-heart';
+        h.textContent = hearts[Math.floor(Math.random() * hearts.length)];
+        h.style.left = Math.random() * 100 + 'vw';
+        h.style.fontSize = (18 + Math.random() * 26) + 'px';
+        h.style.animationDuration = (6 + Math.random() * 7) + 's';
+        h.style.animationDelay = (Math.random() * 8) + 's';
+        document.body.appendChild(h);
+      }
+    })();
+
+    const noBtn  = document.getElementById('no');
+    const yesBtn = document.getElementById('yes');
+    const area   = document.querySelector('.btns');
+    const sub    = document.getElementById('sub');
+    const title  = document.getElementById('title');
+
+    const teases = [
+      "No",
+      "Are you sure? 🥺",
+      "Really?? 😢",
+      "Don't do this 💔",
+      "Think again! 😭",
+      "Last chance...",
+      "Please? 🥹",
+      "You can't catch me!",
+      "Nope, try again 😝",
+      "Have a heart 💕",
+      "I'll cry 😿",
+      "Pretty please?"
+    ];
+    let dodges = 0;
+
+    /* Move the No button to a random reachable spot inside the play area */
+    function runAway() {
+      const aRect = area.getBoundingClientRect();
+      const bw = noBtn.offsetWidth;
+      const bh = noBtn.offsetHeight;
+
+      const maxLeft = Math.max(0, aRect.width  - bw);
+      const maxTop  = Math.max(0, aRect.height - bh);
+
+      const newLeft = Math.random() * maxLeft;
+      const newTop  = Math.random() * maxTop;
+
+      noBtn.style.left = newLeft + 'px';
+      noBtn.style.top  = newTop + 'px';
+      noBtn.style.transform = 'translateX(0)';
+
+      dodges++;
+      noBtn.textContent = teases[dodges % teases.length];
+
+      /* Make the Yes button more tempting each dodge */
+      const scale = Math.min(1 + dodges * 0.08, 1.8);
+      yesBtn.style.transform = 'scale(' + scale + ')';
+      if (dodges === 1) sub.textContent = "Hehe, the No button is shy 😅";
+      if (dodges === 5) sub.textContent = "Just press Yes, it's easier 😉";
+      if (dodges >= 9)  sub.textContent = "Okay it's basically impossible now 🤭";
+    }
+
+    /* Dodge on any sign the finger / cursor is coming for it */
+    ['mouseenter', 'mousedown', 'touchstart', 'pointerenter', 'pointerdown'].forEach(function (evt) {
+      noBtn.addEventListener(evt, function (e) {
+        e.preventDefault();
+        runAway();
+      }, { passive: false });
+    });
+
+    /* On touch screens there's no hover, so also flee when a finger drags near it */
+    area.addEventListener('touchmove', function (e) {
+      const t = e.touches[0];
+      if (!t) return;
+      const r = noBtn.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const dist = Math.hypot(t.clientX - cx, t.clientY - cy);
+      if (dist < 70) runAway();
+    }, { passive: true });
+
+    /* ----- YES! ----- */
+    yesBtn.addEventListener('click', winning);
+    function winning() {
+      document.getElementById('ask').style.display = 'none';
+      const win = document.getElementById('win');
+      win.style.display = 'flex';
+      launchConfetti();
+    }
+
+    function launchConfetti() {
+      const emojis = ['💖','💕','🎉','💗','🌸','✨','🧸','💞','🩷'];
+      for (let i = 0; i < 80; i++) {
+        const c = document.createElement('div');
+        c.className = 'confetti';
+        c.textContent = emojis[Math.floor(Math.random() * emojis.length)];
+        c.style.left = Math.random() * 100 + 'vw';
+        c.style.fontSize = (16 + Math.random() * 22) + 'px';
+        c.style.animationDuration = (2.5 + Math.random() * 2.5) + 's';
+        c.style.animationDelay = (Math.random() * 1.2) + 's';
+        document.body.appendChild(c);
+        setTimeout(() => c.remove(), 6000);
+      }
+    }
+  </script>
+</body>
+</html>
