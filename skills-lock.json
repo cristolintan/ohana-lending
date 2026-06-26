@@ -7,6 +7,12 @@
       "skillPath": ".github/skills/lightweight-charts/SKILL.md",
       "computedHash": "7d3b6f51bdbe175b1aace1b994a70f07c52d12b72fb1768cff92b6daa297b7a6"
     },
+    "mobile-app-ui-design": {
+      "source": "ceorkm/mobile-app-ui-design",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "b55732a1e5fbd0d00eb205d52af2bc72cfb9dbd13f8a7fd38d25acdc96f7ac5e"
+    },
     "supabase": {
       "source": "supabase/agent-skills",
       "sourceType": "github",

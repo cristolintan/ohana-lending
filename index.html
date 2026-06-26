@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Ohana" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="manifest" href="manifest.json" />
-  <meta name="theme-color" content="#047857" />
+  <meta name="theme-color" content="#111114" />
 
   <!-- Tailwind (vendored locally — no CDN / no cross-origin request) -->
   <script src="./tailwindcss.js"></script>
@@ -55,9 +55,95 @@
       font-family: sans-serif, Arial, Helvetica;
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
-      background: #f8fafc;
+      background: #111114;
+      color: #f4f4f5;
       -webkit-tap-highlight-color: transparent;
       overscroll-behavior-y: contain;   /* no pull-to-refresh bounce in the PWA */
+      font-variant-numeric: tabular-nums; /* aligned, non-jittery figures app-wide */
+    }
+
+    /* ───────── Dark theme (screen only — print stays black-on-white) ─────────
+       Remaps the neutral light palette to dark surfaces while keeping the
+       emerald/amber/red/etc. accents. Elevation: body < card (.bg-white) <
+       chip (.bg-slate-50/100). */
+    @media screen {
+      /* Surfaces */
+      .bg-white            { background-color: #1c1c21 !important; }
+      .bg-white\/80        { background-color: rgba(17,17,20,0.82) !important; }
+      .bg-white\/90        { background-color: rgba(17,17,20,0.90) !important; }
+      .bg-white\/20        { background-color: rgba(255,255,255,0.14) !important; }
+      .bg-slate-50         { background-color: #26262c !important; }
+      .bg-slate-100        { background-color: #2d2d34 !important; }
+      .bg-slate-900        { background-color: #000000 !important; }
+
+      /* Neutral text ramp */
+      .text-slate-800 { color: #f4f4f5 !important; }
+      .text-slate-700 { color: #e6e6ea !important; }
+      .text-slate-600 { color: #d2d2d8 !important; }
+      .text-slate-500 { color: #a3a3ad !important; }
+      .text-slate-400 { color: #87878f !important; }
+      .text-slate-300 { color: #6a6a72 !important; }
+
+      /* Borders */
+      .border-slate-50   { border-color: #29292f !important; }
+      .border-slate-100  { border-color: #2d2d34 !important; }
+      .border-slate-200  { border-color: #38383f !important; }
+      .border-slate-400  { border-color: #4a4a52 !important; }
+      .border-emerald-300 { border-color: rgba(16,185,129,0.45) !important; }
+      .border-emerald-100 { border-color: rgba(16,185,129,0.25) !important; }
+      .border-amber-300  { border-color: rgba(245,158,11,0.45) !important; }
+      .border-amber-200  { border-color: rgba(245,158,11,0.35) !important; }
+      .border-red-200    { border-color: rgba(239,68,68,0.40) !important; }
+
+      /* Soft accent fills → translucent on dark */
+      .bg-emerald-50  { background-color: rgba(16,185,129,0.15) !important; }
+      .bg-emerald-100 { background-color: rgba(16,185,129,0.22) !important; }
+      .bg-amber-50    { background-color: rgba(245,158,11,0.15) !important; }
+      .bg-amber-100   { background-color: rgba(245,158,11,0.22) !important; }
+      .bg-red-50      { background-color: rgba(239,68,68,0.15) !important; }
+      .bg-teal-50     { background-color: rgba(20,184,166,0.15) !important; }
+      .bg-teal-100    { background-color: rgba(20,184,166,0.22) !important; }
+      .bg-sky-50      { background-color: rgba(56,189,248,0.15) !important; }
+      .bg-sky-100     { background-color: rgba(56,189,248,0.22) !important; }
+      .bg-rose-100    { background-color: rgba(244,63,94,0.22) !important; }
+      .bg-violet-100  { background-color: rgba(139,92,246,0.22) !important; }
+
+      /* Accent text → brighter for dark legibility */
+      .text-emerald-800, .text-emerald-700, .text-emerald-600, .text-emerald-500 { color: #34d399 !important; }
+      .text-amber-800,   .text-amber-700,   .text-amber-600  { color: #fbbf24 !important; }
+      .text-red-700,     .text-red-600,     .text-red-500,   .text-red-400 { color: #f87171 !important; }
+      .text-teal-800,    .text-teal-700,    .text-teal-600   { color: #2dd4bf !important; }
+      .text-sky-700  { color: #38bdf8 !important; }
+      .text-rose-700 { color: #fb7185 !important; }
+      .text-violet-700 { color: #a78bfa !important; }
+
+      /* Inputs / selects */
+      input, select, textarea {
+        background-color: #1c1c21 !important;
+        color: #f4f4f5 !important;
+        border-color: #2d2d34 !important;
+        color-scheme: dark;
+      }
+      input::placeholder, textarea::placeholder { color: #6a6a72 !important; }
+      option { background-color: #1c1c21; color: #f4f4f5; }
+      .bg-white\/95 { background-color: rgba(28,28,33,0.96) !important; }
+
+      /* Signature pad must stay white so the (near-black) ink is visible and
+         prints correctly into the contract. */
+      canvas.cursor-crosshair { background-color: #ffffff !important; }
+
+      /* Keep the loan-agreement preview as readable "paper" even on screen
+         (printing is handled separately and is unaffected). */
+      #agreement-print { background: #ffffff !important; color: #1e293b !important; }
+      #agreement-print .bg-white { background: #ffffff !important; }
+      #agreement-print .text-slate-800,
+      #agreement-print .text-slate-700,
+      #agreement-print .text-slate-600,
+      #agreement-print .text-slate-500,
+      #agreement-print .text-slate-400 { color: #1e293b !important; }
+      #agreement-print .border-slate-100,
+      #agreement-print .border-slate-200,
+      #agreement-print .border-slate-400 { border-color: #cbd5e1 !important; }
     }
     /* Smooth momentum scroll on iOS */
     .scroll-ios { -webkit-overflow-scrolling: touch; overflow-y: auto; }
