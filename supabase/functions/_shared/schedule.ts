@@ -96,7 +96,7 @@ function computeStatusBase(loan: Loan, allPayments: Pay[]): Status {
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
   const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
-  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft === 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
+  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0.005 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
 export function computeStatus(loan: Loan, allPayments: Pay[]): Status {
