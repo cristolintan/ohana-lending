@@ -1,7 +1,7 @@
 // sw.js — Ohana Lending PWA service worker
 // Relative asset paths so it works whether the app is served from "/"
 // (local dev) or a subpath like "/ohana-lending/" (GitHub Pages).
-const CACHE = "ohana-v13";
+const CACHE = "ohana-v14";
 
 const ASSETS = [
   "./",
@@ -71,4 +71,45 @@ self.addEventListener("fetch", e => {
       return res;
     }))
   );
+});
+
+// ─── Web Push (internal staff alerts) ────────────────────────────────────────
+// Payload shape (JSON): { title, body, url, icon, tag, requireInteraction }
+self.addEventListener("push", e => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; }
+  catch { data = { body: e.data ? e.data.text() : "" }; }
+
+  const title = data.title || "Ohana Lending";
+  const options = {
+    body: data.body || "",
+    icon: data.icon || "./icons/icon-192.png",   // resolves under the SW scope
+    badge: "./icons/icon-192.png",
+    tag: data.tag || undefined,                   // same tag collapses into one
+    renotify: !!data.tag,
+    requireInteraction: !!data.requireInteraction,
+    data: { url: data.url || "./" }
+  };
+  e.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Click → focus an already-open app tab (and tell it where to go), else open one.
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  const raw = (e.notification.data && e.notification.data.url) || "./";
+  // Resolve relative URLs (e.g. "?loan=OL-0001") against the scope so the
+  // GitHub Pages subpath "/ohana-lending/" is preserved.
+  const targetUrl = new URL(raw, self.registration.scope).href;
+
+  e.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const c of clients) {
+      if (c.url.startsWith(self.registration.scope) && "focus" in c) {
+        await c.focus();
+        c.postMessage({ type: "notification-click", url: targetUrl });
+        return;
+      }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(targetUrl);
+  })());
 });

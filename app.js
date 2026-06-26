@@ -62,6 +62,18 @@ const SUPABASE_URL = "https://hjlibhrxyfipsajcywzj.supabase.co";
 const SUPABASE_KEY = "sb_publishable_6mSMEHYq3OrTl-sXlys_IQ_IDtmiFBo"; // publishable — safe with RLS
 const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
+// Web Push: the VAPID *public* key is safe to ship in client code. The matching
+// private key lives ONLY in the Supabase Edge Function secrets.
+const VAPID_PUBLIC_KEY = "BFyZTv3Cc5p6EKOG-68__FVzZHzApu09UxQrrrLR6vDB7srZFgUNYSwKHPk-QULfN-TIN22xKLWQ3G2QKdvqqks";
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
 // Ensure an (anonymous) session exists so RLS policies (auth.uid()) resolve.
 async function ensureSession() {
   if (!sb) throw new Error("Supabase library not loaded.");
@@ -114,6 +126,15 @@ const api = {
   async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
   async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
   async delTx(id) { const { error } = await sb.from("transactions").delete().eq("id", id); if (error) throw error; },
+  async savePush(sub) {
+    const j = sub.toJSON();
+    const { error } = await sb.from("push_subscriptions")
+      .upsert({ endpoint: sub.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: "endpoint" });
+    if (error) throw error;
+  },
+  async deletePush(endpoint) { const { error } = await sb.from("push_subscriptions").delete().eq("endpoint", endpoint); if (error) throw error; },
+  // Fire an internal staff alert via the send-push Edge Function (never blocks the caller).
+  async notify(payload) { try { await sb.functions.invoke("send-push", { body: payload }); } catch (e) { console.error("notify failed", e); } },
   async addQueue(q) { const { error } = await sb.from("queue").insert({ borrower: q.borrower, amount: q.amount, queue_date: q.date, note: q.note }); if (error) throw error; },
   async setQueueStatus(id, status) { const { error } = await sb.from("queue").update({ status }).eq("id", id); if (error) throw error; },
   async delQueue(id) { const { error } = await sb.from("queue").delete().eq("id", id); if (error) throw error; },
@@ -295,7 +316,7 @@ const txDir = cat => { const f = TX_TYPES.find(t => t[0] === cat); return f ? f[
 const inputCls = "w-full px-3 py-2.5 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none text-slate-800 bg-white text-sm";
 const labelCls = "block text-s font-semibold text-slate-500 mb-1.5 uppercase tracking-wide";
 
-function Stat({ label, value, tone, small }) {
+function Stat({ label, value, tone, small, compact }) {
   const tones = {
     slate: "bg-slate-100 text-slate-700",
     amber: "bg-amber-50 text-amber-800",
@@ -304,9 +325,9 @@ function Stat({ label, value, tone, small }) {
     red: "bg-red-50 text-red-700"
   };
   return (
-    <div className={`rounded-2xl p-3.5 ${tones[tone]}`}>
-      <p className="text-s font-semibold uppercase tracking-wide opacity-60">{label}</p>
-      <p className={`font-bold mt-0.5 ${small ? "text-sm" : "text-lg"}`}>{value}</p>
+    <div className={`${compact ? "rounded-xl px-3 py-2" : "rounded-2xl p-3.5"} ${tones[tone]}`}>
+      <p className={`${compact ? "text-[10px]" : "text-s"} font-semibold uppercase tracking-wide opacity-60 truncate`}>{label}</p>
+      <p className={`font-bold ${compact ? "text-sm leading-tight" : `mt-0.5 ${small ? "text-sm" : "text-lg"}`}`}>{value}</p>
     </div>
   );
 }
@@ -845,7 +866,7 @@ function App() {
   const [adminPending, setAdminPending] = useState([]);
   const [adminEmail, setAdminEmail] = useState("");
   const [adminBusy, setAdminBusy] = useState(false);
-  const [tab, setTab] = useState("new");
+  const [tab, setTab] = useState("home");
   const [toast, setToast] = useState("");
   const [agreementLoanId, setAgreementLoanId] = useState(null);
   const [recordFilter, setRecordFilter] = useState("active");
@@ -864,6 +885,13 @@ function App() {
   const [qDate, setQDate] = useState(today());
   const [qNote, setQNote] = useState("");
   const [fundingQueueId, setFundingQueueId] = useState(null); // queue entry being turned into a loan
+
+  // Web Push: state machine — loading | unsupported | ios-hint | denied | off | on
+  const [pushState, setPushState] = useState("loading");
+  // Deep link from a notification click (e.g. "?loan=OL-0001")
+  const [pendingLoanRef, setPendingLoanRef] = useState(() => {
+    try { return new URLSearchParams(location.search).get("loan"); } catch { return null; }
+  });
 
   // Calc inputs
   const [name, setName] = useState("");
@@ -1195,6 +1223,40 @@ function App() {
     };
   }, [db.queue, cashflow.balance]);
 
+  // Dashboard / landing overview: portfolio KPIs + the next outstanding
+  // installment per active borrower, surfaced earliest-due first.
+  const dashboard = useMemo(() => {
+    const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const todayStr = iso(new Date());
+    const wk = new Date(); wk.setDate(wk.getDate() + 7); const weekStr = iso(wk);
+    let outstanding = 0, overdueAmt = 0, dueThisWeek = 0, collectedAll = 0, activeCount = 0, paidCount = 0;
+    const dues = [];
+    db.loans.forEach(l => {
+      const st = computeStatus(l, db.payments);
+      collectedAll += st.totalLogged;
+      if (st.overallStatus === "FULLY PAID") { paidCount++; return; }
+      activeCount++;
+      outstanding += st.grandLeft;
+      st.rows.forEach(r => {
+        if (r.amtLeft > 0.005) {
+          const due = iso(r.due);
+          if (due < todayStr) overdueAmt += r.amtLeft;
+          else if (due <= weekStr) dueThisWeek += r.amtLeft;
+        }
+      });
+      const next = st.rows.find(r => r.amtLeft > 0.005);
+      if (next) {
+        const due = iso(next.due);
+        dues.push({ loanId: l.id, ref: l.ref, borrower: l.borrower, due: next.due, dueStr: due,
+          amtLeft: next.amtLeft, status: next.status, grandLeft: st.grandLeft,
+          overdue: due < todayStr, soon: due >= todayStr && due <= weekStr });
+      }
+    });
+    dues.sort((a, b) => a.dueStr < b.dueStr ? -1 : a.dueStr > b.dueStr ? 1 : 0);
+    return { activeCount, paidCount, outstanding, overdueAmt, dueThisWeek, collectedAll,
+      overdueCount: dues.filter(d => d.overdue).length, dues, cash: cashflow.balance };
+  }, [db.loans, db.payments, cashflow.balance]);
+
   const addQueueEntry = async () => {
     const borrower = qBorrower.trim();
     const amt = Number(qAmount);
@@ -1238,6 +1300,69 @@ function App() {
     setTab("new");
     flash(`Funding ${entry.borrower} — review and save the loan.`);
   };
+
+  // ── Web Push: detect current capability/permission/subscription state ──
+  const pushSupported = typeof window !== "undefined" && "Notification" in window && "serviceWorker" in navigator && "PushManager" in window;
+  useEffect(() => {
+    if (!approved) return;
+    let alive = true;
+    (async () => {
+      const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+      if (!pushSupported) { if (alive) setPushState(isIOS && !standalone ? "ios-hint" : "unsupported"); return; }
+      if (Notification.permission === "denied") { if (alive) setPushState("denied"); return; }
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (alive) setPushState(sub && Notification.permission === "granted" ? "on" : "off");
+      } catch { if (alive) setPushState("off"); }
+    })();
+    return () => { alive = false; };
+  }, [approved, pushSupported]);
+
+  const enableAlerts = async () => {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { setPushState(perm === "denied" ? "denied" : "off"); return; }
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+      await api.savePush(sub);
+      setPushState("on");
+      flash("Alerts enabled on this device.");
+    } catch (e) { console.error(e); flash("Could not enable alerts."); }
+  };
+  const disableAlerts = async () => {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await api.deletePush(sub.endpoint).catch(() => {}); await sub.unsubscribe(); }
+      setPushState("off");
+      flash("Alerts disabled on this device.");
+    } catch (e) { console.error(e); flash("Could not disable alerts."); }
+  };
+
+  // ── Deep links: notification → open the relevant loan once data is loaded ──
+  useEffect(() => {
+    if (!pendingLoanRef || !db.loans.length) return;
+    const l = db.loans.find(x => x.ref === pendingLoanRef);
+    if (l) { setLoanIdOvr(l.ref); setSelBorrower(""); setTab("status"); }
+    setPendingLoanRef(null);
+    try { history.replaceState(null, "", location.pathname); } catch {}
+  }, [pendingLoanRef, db.loans]);
+
+  // A notification click on an already-open tab arrives as a SW message.
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMsg = e => {
+      if (!e.data || e.data.type !== "notification-click") return;
+      let ref = null;
+      try { ref = new URL(e.data.url).searchParams.get("loan"); } catch {}
+      if (ref) setPendingLoanRef(ref); else setTab("home");
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+  }, []);
 
   const exportCsv = () => {
     const esc = v => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -1316,6 +1441,14 @@ function App() {
       const over = statusData ? amt - statusData.grandLeft : 0;
       if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
       else flash(`Logged ${fmt(amt)}`);
+      // Alert other staff that a payment came in (fire-and-forget; never blocks).
+      api.notify({
+        title: "Payment received",
+        body: `${resolved.loan.borrower} paid ${fmt(amt)} · ${resolved.loan.ref}`,
+        url: `?loan=${encodeURIComponent(resolved.loan.ref)}`,
+        target: "all_staff",
+        exclude: (session && session.user && session.user.id) || null,
+      });
     } catch (e) { console.error(e); flash("Save failed — check connection."); }
   };
   const deletePayment = async id => { try { await api.delPayment(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
@@ -1347,10 +1480,11 @@ function App() {
 
   // ── Bottom nav ──
   const navItems = [
+    { id: "home",    label: "Home",      icon: "layout-dashboard" },
     { id: "new",     label: "New Loan",  icon: "calculator" },
     { id: "records", label: "Records",   icon: "file-text" },
     { id: "queue",   label: "Queue",     icon: "users" },
-    { id: "status",  label: "Payments & Status",  icon: "wallet" },
+    { id: "status",  label: "Payments",  icon: "wallet" },
     { id: "cashflow", label: "Cash Flow", icon: "trending-up" },
   ];
 
@@ -1374,6 +1508,97 @@ function App() {
       {/* Body */}
       <main ref={mainRef} className="flex-1 overflow-y-auto scroll-ios px-4 py-4 pb-24 space-y-4">
         <div key={tab} className="space-y-4 animate-fade-in">
+
+        {/* ── HOME / DASHBOARD ── */}
+        {tab === "home" && (<>
+          <div className="bg-gradient-to-br from-emerald-700 to-emerald-600 rounded-2xl p-5 text-white shadow-sm">
+            <p className="text-emerald-100 text-s font-semibold uppercase tracking-wide">Outstanding Balance</p>
+            <p className="text-3xl font-bold mt-1">{fmt(dashboard.outstanding)}</p>
+            <p className="text-emerald-100 text-s mt-1">{dashboard.activeCount} active loan{dashboard.activeCount !== 1 ? "s" : ""} · {dashboard.paidCount} fully paid</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <Stat compact label="Cash on Hand" value={fmt(dashboard.cash)} tone={dashboard.cash >= 0 ? "emerald" : "red"} />
+            <Stat compact label="Overdue" value={fmt(dashboard.overdueAmt)} tone={dashboard.overdueAmt > 0 ? "red" : "slate"} />
+            <Stat compact label="Due in 7 Days" value={fmt(dashboard.dueThisWeek)} tone="amber" />
+            <Stat compact label="Total Collected" value={fmt(dashboard.collectedAll)} tone="teal" />
+          </div>
+
+          {/* Enable alerts (Web Push) */}
+          {pushState !== "loading" && pushState !== "unsupported" && (
+            pushState === "on" ? (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-emerald-800 flex items-center gap-2"><i data-lucide="bell" className="w-4 h-4"></i> Alerts on for this device</p>
+                <button onClick={disableAlerts} className="text-s font-semibold text-emerald-700 underline shrink-0">Turn off</button>
+              </div>
+            ) : pushState === "ios-hint" ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
+                <p className="text-sm font-semibold text-amber-800 flex items-center gap-2"><i data-lucide="bell" className="w-4 h-4"></i> Turn on alerts</p>
+                <p className="text-s text-amber-700 mt-0.5">On iPhone, alerts work only when this app is added to your Home Screen. Tap <b>Share → Add to Home Screen</b>, open it from there, then enable alerts.</p>
+              </div>
+            ) : pushState === "denied" ? (
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3">
+                <p className="text-sm font-semibold text-slate-700 flex items-center gap-2"><i data-lucide="bell-off" className="w-4 h-4"></i> Alerts are blocked</p>
+                <p className="text-s text-slate-500 mt-0.5">Notifications are turned off in your browser settings for this site. Re-enable them there, then reload.</p>
+              </div>
+            ) : (
+              <button onClick={enableAlerts} className="w-full bg-white border border-emerald-300 rounded-2xl px-4 py-3 flex items-center justify-between gap-3 active:bg-emerald-50 transition">
+                <span className="text-sm font-semibold text-emerald-700 flex items-center gap-2"><i data-lucide="bell" className="w-4 h-4"></i> Enable alerts on this device</span>
+                <i data-lucide="chevron-right" className="w-5 h-5 text-emerald-400"></i>
+              </button>
+            )
+          )}
+
+          {/* Upcoming & overdue dues — one row per active borrower (their next unpaid installment) */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <p className="font-bold text-slate-700">Upcoming Dues</p>
+              {dashboard.overdueCount > 0 &&
+                <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-600 text-[10px] font-semibold">{dashboard.overdueCount} overdue</span>}
+            </div>
+            {dashboard.dues.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-sm">No outstanding dues. 🎉</div>
+            ) : dashboard.dues.map(d => (
+              <button key={d.loanId} onClick={() => { setLoanIdOvr(d.ref); setSelBorrower(""); setTab("status"); }}
+                className={`w-full flex items-center justify-between gap-3 px-4 py-3 border-t border-slate-100 first:border-t-0 transition text-left ${
+                  d.overdue ? "bg-red-50 border-l-4 border-l-red-600 active:bg-red-100"
+                  : d.soon ? "bg-red-50 border-l-4 border-l-red-500 active:bg-red-100"
+                  : "active:bg-slate-50"}`}>
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-700 truncate">{d.borrower}</p>
+                  <p className="text-s text-slate-400">{d.ref} · due {fmtDate(parseDate(d.dueStr))}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className={`font-bold ${d.overdue || d.soon ? "text-red-600" : "text-slate-700"}`}>{fmt(d.amtLeft)}</p>
+                  {d.overdue ? (
+                    <span className="inline-flex items-center gap-1 mt-0.5 px-2 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold">⚠ Overdue</span>
+                  ) : d.soon ? (
+                    <span className="inline-flex items-center gap-1 mt-0.5 px-2 py-0.5 rounded-full bg-red-100 text-red-700 ring-1 ring-red-400 text-[10px] font-bold">⚠ Due soon</span>
+                  ) : (
+                    <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-semibold">Upcoming</span>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Queue snapshot */}
+          {queueView.rows.length > 0 && (
+            <button onClick={() => setTab("queue")} className="w-full bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3 flex items-center justify-between active:bg-slate-50 transition text-left">
+              <div>
+                <p className="font-bold text-slate-700">Borrower Queue</p>
+                <p className="text-s text-slate-400">{queueView.rows.length} waiting · {queueView.readyCount} ready to fund</p>
+              </div>
+              <i data-lucide="chevron-right" className="w-5 h-5 text-slate-400"></i>
+            </button>
+          )}
+
+          {/* Quick actions */}
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={() => { resetForm(); setTab("new"); }} className="py-3 rounded-2xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New Loan</button>
+            <button onClick={() => setTab("records")} className="py-3 rounded-2xl bg-white border border-slate-200 active:bg-slate-100 text-slate-700 text-sm font-semibold transition">View Records</button>
+          </div>
+        </>)}
 
         {/* ── NEW LOAN ── */}
         {tab === "new" && (<>
