@@ -79,3 +79,6 @@
 .claude/skills/supabase-postgres-best-practices/references/security-rls-basics.md
 .claude/skills/supabase-postgres-best-practices/references/security-rls-performance.md
 .mcp.json
+skills-lock.json
+.agents/skills/mobile-app-ui-design/SKILL.md
+.claude/skills/mobile-app-ui-design/SKILL.md

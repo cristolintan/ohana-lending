@@ -25,6 +25,9 @@ function parseDate(str) {
 }
 const fmtDate = d => d.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
 const today = () => new Date().toISOString().slice(0, 10);
+const greeting = () => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; };
+const firstName = email => { const s = (email || "").split("@")[0].split(/[._\-0-9]/)[0]; return s ? s[0].toUpperCase() + s.slice(1) : ""; };
+const buzz = (ms = 12) => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch {} };
 
 function pesoWords(n) {
   n = Math.floor(Number(n) || 0);
@@ -342,6 +345,39 @@ function Badge({ s }) {
   return <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${map[s] || "bg-slate-100 text-slate-500"}`}>{s}</span>;
 }
 
+// Colored initials avatar — deterministic color per borrower name.
+function Avatar({ name, size = "w-9 h-9" }) {
+  const palette = [
+    "bg-emerald-100 text-emerald-700", "bg-amber-100 text-amber-700",
+    "bg-sky-100 text-sky-700", "bg-rose-100 text-rose-700",
+    "bg-violet-100 text-violet-700", "bg-teal-100 text-teal-700",
+  ];
+  const clean = (name || "?").trim();
+  const initials = (clean.split(/\s+/).slice(0, 2).map(w => w[0]).join("") || "?").toUpperCase();
+  let h = 0; for (let i = 0; i < clean.length; i++) h = (h * 31 + clean.charCodeAt(i)) >>> 0;
+  return <div className={`${size} shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${palette[h % palette.length]}`}>{initials}</div>;
+}
+
+// Thin progress bar (e.g. % of a loan repaid, or queue funding progress).
+function ProgressBar({ pct, tone = "emerald" }) {
+  const bar = { emerald: "bg-emerald-500", amber: "bg-amber-400", red: "bg-red-500", sky: "bg-sky-500", slate: "bg-slate-300" };
+  const w = Math.max(0, Math.min(100, Math.round((pct || 0) * 100)));
+  return <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${bar[tone] || bar.emerald} transition-all`} style={{ width: `${w}%` }} /></div>;
+}
+
+// Minimal SVG sparkline from a series of numbers (e.g. cash position over time).
+function Sparkline({ values, color = "#10b981", className = "w-full h-5" }) {
+  const v = (values || []).filter(n => typeof n === "number");
+  if (v.length < 2) return null;
+  const min = Math.min(...v), max = Math.max(...v), span = max - min || 1;
+  const pts = v.map((n, i) => `${(i / (v.length - 1)) * 100},${21 - ((n - min) / span) * 19}`).join(" ");
+  return (
+    <svg viewBox="0 0 100 22" preserveAspectRatio="none" className={className} aria-hidden="true">
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 function Toast({ msg }) {
   if (!msg) return null;
   return (
@@ -395,7 +431,7 @@ function PositionChart({ data, fmt, baseline }) {
     const chart = LWC.createChart(wrapRef.current, {
       autoSize: true,
       layout: { background: { color: "transparent" }, textColor: "#94a3b8", attributionLogo: false },
-      grid: { vertLines: { visible: false }, horzLines: { color: "#f1f5f9" } },
+      grid: { vertLines: { visible: false }, horzLines: { color: "#26262c" } },
       rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.18, bottom: 0.12 } },
       timeScale: { borderVisible: false, rightOffset: 4 },
       // handleScale / handleScroll left at their defaults → full pan + zoom.
@@ -868,6 +904,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [agreementLoanId, setAgreementLoanId] = useState(null);
   const [recordFilter, setRecordFilter] = useState("active");
+  const [recordSearch, setRecordSearch] = useState("");
   const [cfRange, setCfRange] = useState("all");
   const [cfDir, setCfDir] = useState("all");
   const [cfProjected, setCfProjected] = useState(false);
@@ -1003,6 +1040,7 @@ function App() {
         }
         flash(`Saved ${ref} — ${borrower}`);
       }
+      buzz();
       await refresh();
       resetForm();
       setTab("records");
@@ -1117,14 +1155,16 @@ function App() {
     }, { principal: 0, outstanding: 0, collected: 0, active: 0, overdue: 0 });
   }, [db.loans, db.payments]);
 
-  const filteredLoans = useMemo(() =>
-    db.loans
+  const filteredLoans = useMemo(() => {
+    const q = recordSearch.trim().toLowerCase();
+    return db.loans
       .map(l => ({ l, s: computeStatus(l, db.payments) }))
       .filter(({ s }) =>
         recordFilter === "all" ? true
         : recordFilter === "paid" ? s.overallStatus === "FULLY PAID"
-        : s.overallStatus === "ACTIVE BALANCE"),
-  [db.loans, db.payments, recordFilter]);
+        : s.overallStatus === "ACTIVE BALANCE")
+      .filter(({ l }) => !q || l.borrower.toLowerCase().includes(q) || (l.ref || "").toLowerCase().includes(q));
+  }, [db.loans, db.payments, recordFilter, recordSearch]);
 
   const cashflow = useMemo(() => {
     const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -1228,6 +1268,7 @@ function App() {
     const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const todayStr = iso(new Date());
     const wk = new Date(); wk.setDate(wk.getDate() + 7); const weekStr = iso(wk);
+    const d0 = new Date(); d0.setHours(0, 0, 0, 0);
     let outstanding = 0, overdueAmt = 0, dueThisWeek = 0, collectedAll = 0, activeCount = 0, paidCount = 0;
     const dues = [];
     db.loans.forEach(l => {
@@ -1246,8 +1287,12 @@ function App() {
       const next = st.rows.find(r => r.amtLeft > 0.005);
       if (next) {
         const due = iso(next.due);
+        const total = Number(l.amount) + st.summedInterest;
+        const pct = total > 0 ? Math.max(0, Math.min(1, st.totalLogged / total)) : 0;
+        const dd = Math.round((new Date(next.due.getFullYear(), next.due.getMonth(), next.due.getDate()) - d0) / 86400000);
+        const dueLabel = dd === 0 ? "due today" : dd < 0 ? `${-dd}d overdue` : dd === 1 ? "tomorrow" : `in ${dd} days`;
         dues.push({ loanId: l.id, ref: l.ref, borrower: l.borrower, due: next.due, dueStr: due,
-          amtLeft: next.amtLeft, status: next.status, grandLeft: st.grandLeft,
+          amtLeft: next.amtLeft, status: next.status, grandLeft: st.grandLeft, pct, dueLabel,
           overdue: due < todayStr, soon: due >= todayStr && due <= weekStr });
       }
     });
@@ -1440,6 +1485,7 @@ function App() {
     //if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
     try {
       await api.addPayment({ loanId: resolved.loan.id, date: payDate, amount: amt, type: payType });
+      buzz();
       await refresh();
       setPayAmount("");
       const over = statusData ? amt - statusData.grandLeft : 0;
@@ -1480,6 +1526,24 @@ function App() {
   // Reset scroll to top whenever the tab changes (better mobile flow)
   const mainRef = useRef(null);
   useEffect(() => { if (mainRef.current) mainRef.current.scrollTop = 0; }, [tab]);
+
+  // Pull-to-refresh (native pull-to-refresh is disabled via overscroll-behavior).
+  const pull = useRef({ y0: 0, active: false, dist: 0 });
+  const [pullDist, setPullDist] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const onPullStart = e => { const m = mainRef.current; if (m && m.scrollTop <= 0 && !refreshing) pull.current = { y0: e.touches[0].clientY, active: true, dist: 0 }; };
+  const onPullMove = e => {
+    if (!pull.current.active) return;
+    const d = e.touches[0].clientY - pull.current.y0;
+    if (d > 0 && mainRef.current && mainRef.current.scrollTop <= 0) { pull.current.dist = d; setPullDist(Math.min(d, 90)); }
+    else if (d <= 0) { pull.current.active = false; if (pullDist) setPullDist(0); }
+  };
+  const onPullEnd = async () => {
+    if (!pull.current.active) return;
+    const trigger = pull.current.dist > 60;
+    pull.current.active = false; setPullDist(0);
+    if (trigger && !refreshing) { setRefreshing(true); buzz(8); try { await refresh(); } catch (e) { console.error(e); } setRefreshing(false); }
+  };
   // Keep Lucide icons rendered across tab switches / re-renders
   useEffect(() => { if (window.lucide) lucide.createIcons(); });
 
@@ -1493,7 +1557,7 @@ function App() {
   ];
 
   return (
-    <div className="flex flex-col min-h-screen bg-slate-50 font-sans">
+    <div className="flex flex-col min-h-screen font-sans">
       {/* Header */}
       <header className="bg-white/80 backdrop-blur border-b border-slate-100 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
         <div className="flex items-center gap-2.5">
@@ -1512,32 +1576,57 @@ function App() {
       </header>
 
       {/* Body */}
-      <main ref={mainRef} className="flex-1 overflow-y-auto scroll-ios px-4 py-4 pb-24 space-y-4">
+      <main ref={mainRef} onTouchStart={onPullStart} onTouchMove={onPullMove} onTouchEnd={onPullEnd} className="flex-1 overflow-y-auto scroll-ios px-4 py-4 pb-24 space-y-4">
+        {(pullDist > 0 || refreshing) && (
+          <div className="flex items-center justify-center text-slate-400 text-xs overflow-hidden" style={{ height: refreshing ? 28 : Math.min(pullDist, 60) }}>
+            <span className={refreshing ? "animate-pulse" : ""}>{refreshing ? "Refreshing…" : pullDist > 60 ? "Release to refresh ↑" : "Pull to refresh ↓"}</span>
+          </div>
+        )}
         <div key={tab} className="space-y-4 animate-fade-in">
 
         {/* ── HOME / DASHBOARD ── */}
         {tab === "home" && (<>
-          <div className="bg-emerald-600 rounded-2xl p-5 text-white shadow-sm">
-            <p className="text-emerald-100 text-xs font-medium">Outstanding Balance</p>
-            <p className="text-3xl font-bold mt-1 tabular-nums">{fmt(dashboard.outstanding)}</p>
-            <p className="text-emerald-100/90 text-xs mt-1.5">{dashboard.activeCount} active loan{dashboard.activeCount !== 1 ? "s" : ""} · {dashboard.paidCount} fully paid</p>
+          <div className="flex items-center justify-between pt-1">
+            <div>
+              <p className="text-lg font-bold text-slate-800">{greeting()}{firstName(session && session.user && session.user.email) ? `, ${firstName(session.user.email)}` : ""}</p>
+              <p className="text-xs text-slate-400">{fmtDate(new Date())} · Ohana Lending</p>
+            </div>
+            {pushState === "on" ? (
+              <button onClick={disableAlerts} title="Tap to turn off alerts" className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 text-xs font-semibold px-3 py-1.5 rounded-full active:bg-emerald-100 transition shrink-0">
+                <i data-lucide="bell" className="w-3.5 h-3.5"></i> Alerts on
+              </button>
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold shrink-0">
+                {(((session && session.user && session.user.email) || "?").trim()[0] || "?").toUpperCase()}
+              </div>
+            )}
+          </div>
+          <div className={`${cardCls} p-5`}>
+            <p className="text-slate-400 text-xs font-medium">Outstanding Balance</p>
+            <p className="text-3xl font-bold mt-1 tabular-nums text-slate-800">{fmt(dashboard.outstanding)}</p>
+            <p className="text-slate-400 text-xs mt-1.5">{dashboard.activeCount} active loan{dashboard.activeCount !== 1 ? "s" : ""} · {dashboard.paidCount} fully paid</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <Stat compact label="Cash on Hand" value={fmt(dashboard.cash)} tone={dashboard.cash >= 0 ? "emerald" : "red"} />
+            <div className={`${cardCls} p-3.5`}>
+              <p className="text-xs text-slate-500">Cash on Hand</p>
+              <p className={`mt-1 text-xl font-bold tabular-nums ${dashboard.cash >= 0 ? "text-slate-800" : "text-red-600"}`}>{fmt(dashboard.cash)}</p>
+            </div>
+            <div className={`${cardCls} p-3.5`}>
+              <p className="text-xs text-slate-500">Active Loans</p>
+              <p className="mt-1 text-xl font-bold tabular-nums text-slate-800">{dashboard.activeCount}</p>
+              <p className="mt-3 text-xs text-emerald-600 flex items-center gap-1"><i data-lucide="arrow-up-right" className="w-3.5 h-3.5"></i> {dashboard.dues.filter(d => d.soon).length} due this week</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
             <Stat compact label="Overdue" value={fmt(dashboard.overdueAmt)} tone={dashboard.overdueAmt > 0 ? "red" : "slate"} />
-            <Stat compact label="Due in 7 Days" value={fmt(dashboard.dueThisWeek)} tone="amber" />
             <Stat compact label="Total Collected" value={fmt(dashboard.collectedAll)} tone="teal" />
           </div>
 
-          {/* Enable alerts (Web Push) */}
-          {pushState !== "loading" && pushState !== "unsupported" && (
-            pushState === "on" ? (
-              <div className="bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-emerald-800 flex items-center gap-2"><i data-lucide="bell" className="w-4 h-4"></i> Alerts on for this device</p>
-                <button onClick={disableAlerts} className="text-xs font-semibold text-emerald-700 underline shrink-0">Turn off</button>
-              </div>
-            ) : pushState === "ios-hint" ? (
+          {/* Enable alerts (Web Push) — full card only when not already on */}
+          {pushState !== "loading" && pushState !== "unsupported" && pushState !== "on" && (
+            pushState === "ios-hint" ? (
               <div className="bg-amber-50 border border-amber-100 rounded-2xl px-4 py-3">
                 <p className="text-sm font-semibold text-amber-800 flex items-center gap-2"><i data-lucide="bell" className="w-4 h-4"></i> Turn on alerts</p>
                 <p className="text-xs text-amber-700 mt-0.5">On iPhone, alerts work only when this app is added to your Home Screen. Tap <b>Share → Add to Home Screen</b>, open it from there, then enable alerts.</p>
@@ -1563,24 +1652,25 @@ function App() {
                 <span className="px-2 py-0.5 rounded-full bg-red-50 text-red-600 text-[11px] font-semibold">{dashboard.overdueCount} overdue</span>}
             </div>
             {dashboard.dues.length === 0 ? (
-              <div className="p-8 text-center text-slate-400 text-sm">No outstanding dues. 🎉</div>
+              <div className="p-8 text-center space-y-2">
+                <p className="text-3xl">🎉</p>
+                <p className="text-slate-500 text-sm font-medium">All caught up — no dues right now.</p>
+                <button onClick={() => setTab("queue")} className="text-emerald-600 text-sm font-semibold active:opacity-70">Add a borrower to the queue →</button>
+              </div>
             ) : dashboard.dues.map(d => (
               <button key={d.loanId} onClick={() => { setLoanIdOvr(d.ref); setSelBorrower(""); setTab("status"); }}
-                className={`w-full flex items-center justify-between gap-3 px-4 py-3 border-t border-slate-50 first:border-t-0 transition text-left active:bg-slate-50 ${
-                  d.overdue ? "border-l-2 border-l-red-500" : d.soon ? "border-l-2 border-l-amber-400" : ""}`}>
-                <div className="min-w-0">
-                  <p className="font-semibold text-slate-800 truncate">{d.borrower}</p>
-                  <p className="text-xs text-slate-400">{d.ref} · due {fmtDate(parseDate(d.dueStr))}</p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className={`font-bold tabular-nums ${d.overdue ? "text-red-600" : d.soon ? "text-amber-600" : "text-slate-800"}`}>{fmt(d.amtLeft)}</p>
-                  {d.overdue ? (
-                    <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full bg-red-50 text-red-600 text-[11px] font-semibold">Overdue</span>
-                  ) : d.soon ? (
-                    <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 text-[11px] font-semibold">Due soon</span>
-                  ) : (
-                    <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[11px] font-semibold">Upcoming</span>
-                  )}
+                className="w-full flex items-center gap-3 px-4 py-3 border-t border-slate-50 first:border-t-0 transition text-left active:bg-slate-50">
+                <Avatar name={d.borrower} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between items-baseline gap-2">
+                    <p className="font-semibold text-slate-800 truncate">{d.borrower}</p>
+                    <p className={`font-bold tabular-nums shrink-0 ${d.overdue ? "text-red-600" : d.soon ? "text-amber-600" : "text-slate-800"}`}>{fmt(d.amtLeft)}</p>
+                  </div>
+                  <div className="flex justify-between items-center mt-0.5 text-xs">
+                    <span className={`truncate ${d.overdue ? "text-red-500 font-medium" : "text-slate-400"}`}>{d.ref} · {d.dueLabel}</span>
+                    <span className="tabular-nums text-slate-400 shrink-0">{Math.round(d.pct * 100)}%</span>
+                  </div>
+                  <div className="mt-1.5"><ProgressBar pct={d.pct} tone={d.overdue ? "red" : d.soon ? "amber" : "emerald"} /></div>
                 </div>
               </button>
             ))}
@@ -1685,13 +1775,27 @@ function App() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <Stat label="Loan Amount" value={fmt(amount)} tone="slate" />
-            <Stat label="Total Interest" value={fmt(calc.totalInterest)} tone="amber" />
-            <Stat label="Total Repayment" value={fmt(calc.totalRepay)} tone="emerald" />
-            <Stat label="Periods" value={calc.rows.length} tone="teal" />
-          </div>
-          
+          {calc.rows.length > 0 && (<div className="animate-scale-in space-y-3">
+            <div className="flex flex-col items-center gap-2 pt-1">
+              <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center"><i data-lucide="check" className="w-6 h-6 text-emerald-600" style={{ strokeWidth: 2.5 }}></i></div>
+              <p className="text-xs text-slate-500">{Math.floor(Number(terms) || 0)} {frequency} payments · {flatRate}% flat</p>
+            </div>
+            <div className={`${cardCls} p-4`}>
+              <div className="flex justify-between items-baseline">
+                <span className="text-sm text-slate-500">Total repayment</span>
+                <span className="text-2xl font-bold tabular-nums text-slate-800">{fmt(calc.totalRepay)}</span>
+              </div>
+              <div className="flex justify-between items-baseline pt-3 mt-3 border-t border-slate-50">
+                <span className="text-sm text-slate-500">Interest earned</span>
+                <span className="text-lg font-bold tabular-nums text-emerald-600">+{fmt(calc.totalInterest)}</span>
+              </div>
+              <div className="flex justify-between mt-2.5 text-xs text-slate-400 tabular-nums">
+                <span>Principal {fmt(amount)}</span>
+                <span>{calc.rows.length} installment{calc.rows.length !== 1 ? "s" : ""}</span>
+              </div>
+            </div>
+          </div>)}
+
         </>)}
 
         {/* ── RECORDS ── */}
@@ -1719,6 +1823,13 @@ function App() {
                 ))}
               </div>
             )}
+            {db.loans.length > 0 && (
+              <div className="relative">
+                <i data-lucide="search" className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                <input value={recordSearch} onChange={e => setRecordSearch(e.target.value)} placeholder="Search name or OL-####"
+                  className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-100 bg-white text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 transition" />
+              </div>
+            )}
             {db.loans.length === 0 && (
               <div className="bg-white rounded-2xl border border-slate-100 p-10 text-center space-y-3">
                 <p className="text-slate-400 text-sm">No loans yet.</p>
@@ -1726,19 +1837,22 @@ function App() {
               </div>
             )}
             {db.loans.length > 0 && filteredLoans.length === 0 && (
-              <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">No {recordFilter === "paid" ? "fully paid" : recordFilter === "active" ? "active" : ""} loans to show.</div>
+              <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">{recordSearch ? `No loans match “${recordSearch}”.` : `No ${recordFilter === "paid" ? "fully paid" : recordFilter === "active" ? "active" : ""} loans to show.`}</div>
             )}
             {filteredLoans.map(({ l, s }, i) => {
               const isOverdue = s.rows.some(r => r.status !== "PAID" && r.due < parseDate(today()));
               return (
                 <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-2 animate-fade-up">
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="text-xs text-emerald-600 font-semibold">{l.ref || l.id}</p>
-                      <p className="font-bold">{l.borrower}</p>
-                      <p className="text-xs text-slate-500">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
+                    <div className="flex items-start gap-3 min-w-0">
+                      <Avatar name={l.borrower} />
+                      <div className="min-w-0">
+                        <p className="text-xs text-emerald-600 font-semibold">{l.ref || l.id}</p>
+                        <p className="font-bold truncate">{l.borrower}</p>
+                        <p className="text-xs text-slate-500">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end gap-1">
+                    <div className="flex flex-col items-end gap-1 shrink-0">
                       {isOverdue && <Badge s="OVERDUE" />}
                       <Badge s={s.overallStatus} />
                     </div>
@@ -1748,6 +1862,12 @@ function App() {
                     <div className="bg-emerald-50 rounded-lg p-2"><p className="text-slate-400">Paid</p><p className="font-bold text-emerald-700">{fmt(s.totalLogged)}</p></div>
                     <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
                   </div>
+                  {(() => { const pct = s.totalLogged / ((Number(l.amount) + s.summedInterest) || 1); return (
+                    <div>
+                      <div className="flex justify-between text-xs text-slate-400 mb-1"><span>Repaid</span><span className="tabular-nums">{Math.round(pct * 100)}%</span></div>
+                      <ProgressBar pct={pct} tone={s.overallStatus === "FULLY PAID" ? "emerald" : isOverdue ? "red" : "emerald"} />
+                    </div>
+                  ); })()}
                   <div className="flex gap-2 pt-1">
                     <button onClick={() => { setLoanIdOvr(l.ref); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">View Payments</button>
                     {s.overallStatus !== "FULLY PAID" && <button onClick={() => editLoan(l)} className="px-4 py-2.5 rounded-xl border border-slate-200 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Edit</button>}
@@ -1782,13 +1902,24 @@ function App() {
           {resolved.error && <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center text-amber-600 font-medium text-sm">{resolved.error}</div>}
 
           {resolved.loan && statusData && (<>
-            <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm flex items-center justify-between gap-2">
-              <div>
-                <p className="text-xs text-emerald-600 font-semibold">{resolved.loan.ref || resolved.loan.id}</p>
-                <p className="font-bold">{resolved.loan.borrower}</p>
-                <p className="text-xs text-slate-500">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
+            <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Avatar name={resolved.loan.borrower} size="w-10 h-10" />
+                  <div className="min-w-0">
+                    <p className="text-xs text-emerald-600 font-semibold">{resolved.loan.ref || resolved.loan.id}</p>
+                    <p className="font-bold truncate">{resolved.loan.borrower}</p>
+                    <p className="text-xs text-slate-500 tabular-nums">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
+                  </div>
+                </div>
+                <Badge s={statusData.overallStatus} />
               </div>
-              <Badge s={statusData.overallStatus} />
+              {(() => { const tot = Number(resolved.loan.amount) + statusData.summedInterest; const pct = statusData.totalLogged / (tot || 1); return (
+                <div>
+                  <div className="flex justify-between text-xs text-slate-400 mb-1"><span className="tabular-nums">{fmt(statusData.totalLogged)} paid</span><span className="tabular-nums">{fmt(statusData.grandLeft)} left · {Math.round(pct * 100)}%</span></div>
+                  <ProgressBar pct={pct} tone="emerald" />
+                </div>
+              ); })()}
             </div>
 
             {/* Revise remaining schedule (frequency and/or terms) */}
@@ -2075,22 +2206,27 @@ function App() {
           {queueView.rows.length === 0 ? (
             <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">The queue is empty. Add a borrower above.</div>
           ) : queueView.rows.map(q => (
-            <div key={q.id} className={`bg-white rounded-2xl border p-4 space-y-3 shadow-sm ${q.ready ? "border-emerald-300" : "border-slate-100"}`}>
+            <div key={q.id} className={`bg-white rounded-2xl border p-4 space-y-3 shadow-sm ${q.ready ? "border-emerald-200" : "border-slate-100"}`}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0">
-                  <div className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-sm font-bold ${q.ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{q.position}</div>
+                  <Avatar name={q.borrower} />
                   <div className="min-w-0">
                     <p className="font-semibold text-slate-800 truncate">{q.borrower}</p>
-                    <p className="text-xs text-slate-400">{fmtDate(parseDate(q.date))}{q.note ? ` · ${q.note}` : ""}</p>
+                    <p className="text-xs text-slate-400">#{q.position} in line · {fmtDate(parseDate(q.date))}{q.note ? ` · ${q.note}` : ""}</p>
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="font-semibold text-slate-800">{fmt(q.amount)}</p>
+                  <p className="font-semibold text-slate-800 tabular-nums">{fmt(q.amount)}</p>
                   <span className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${q.ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{q.ready ? "Ready to fund" : "Waiting"}</span>
                 </div>
               </div>
-              {!q.ready &&
-                <p className="text-xs text-amber-600">Needs {fmt(Math.max(0, q.cumulative - queueView.cash))} more cash on hand (line total to here: {fmt(q.cumulative)}).</p>}
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className={q.ready ? "text-emerald-600 font-medium" : "text-amber-600"}>{q.ready ? "Cash covers this borrower" : `Needs ${fmt(Math.max(0, q.cumulative - queueView.cash))} more`}</span>
+                  <span className="tabular-nums text-slate-400">{Math.round(Math.max(0, Math.min(1, queueView.cash / (q.cumulative || 1))) * 100)}%</span>
+                </div>
+                <ProgressBar pct={q.ready ? 1 : queueView.cash / (q.cumulative || 1)} tone={q.ready ? "emerald" : "amber"} />
+              </div>
               <div className="flex gap-2">
                 <button onClick={() => fundFromQueue(q)} className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition ${q.ready ? "bg-emerald-600 active:bg-emerald-800 text-white" : "border border-emerald-300 active:bg-emerald-50 text-emerald-700"}`}>Fund →</button>
                 <button onClick={() => markQueueFunded(q.id)} className="px-3.5 py-2.5 rounded-xl border border-slate-200 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Mark funded</button>
