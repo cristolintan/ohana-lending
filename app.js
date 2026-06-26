@@ -217,7 +217,7 @@ function computeStatusBase(loan, allPayments) {
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
   const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
-  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft === 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
+  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0.005 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
 // Wraps the schedule engine. If the loan has a mid-stream frequency change
@@ -2016,7 +2016,6 @@ function App() {
                   </tr></thead>
                   <tbody>
                     {cashflow.ledger.map(t => (
-                      console.log(t),
                       <tr key={t.id} onClick={() => { if (t.ref) { setLoanIdOvr(t.ref); setSelBorrower(""); setTab("status"); } }} className={`border-t border-slate-100 ${t.loanId ? "active:bg-slate-50 cursor-pointer" : ""} ${t.projected ? "opacity-60" : ""}`}>
                         <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(parseDate(t.date))}</td>
                         <td className="px-3 py-2">
