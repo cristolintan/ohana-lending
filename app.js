@@ -910,6 +910,7 @@ function App() {
   const [freqDate, setFreqDate] = useState(today());
   const [revFreq, setRevFreq] = useState("");
   const [revTerms, setRevTerms] = useState("");
+  const [showRevise, setShowRevise] = useState(false); // Revise-schedule modal
 
   const flash = msg => { setToast(msg); setTimeout(() => setToast(""), 2500); };
   const refresh = useCallback(async () => { const data = await api.fetchAll(); setDb(data); return data; }, []);
@@ -1452,20 +1453,20 @@ function App() {
   const deletePayment = async id => { try { await api.delPayment(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
 
   const applyRevision = async loan => {
-    if (!freqDate) { flash("Pick an effective date."); return; }
+    if (!freqDate) { flash("Pick an effective date."); return false; }
     const fc = { date: freqDate };
     if (revFreq) fc.frequency = revFreq;
     if (revTerms && Number(revTerms) > 0) fc.terms = Math.floor(Number(revTerms));
-    if (!fc.frequency && !fc.terms) { flash("Choose a new frequency and/or number of installments."); return; }
+    if (!fc.frequency && !fc.terms) { flash("Choose a new frequency and/or number of installments."); return false; }
     const desc = [fc.frequency, fc.terms ? `${fc.terms} installments` : null].filter(Boolean).join(", ");
     const note = fc.terms ? "total interest re-prices for the new term" : "same total owed";
-    if (!confirm(`Revise ${loan.ref || loan.id} from ${fmtDate(parseDate(freqDate))} → ${desc}? Paid installments stay; the remaining balance re-amortizes (${note}).`)) return;
-    try { await api.setFreqChange(loan.id, fc); await refresh(); setRevFreq(""); setRevTerms(""); flash("Schedule revised."); }
-    catch (e) { console.error(e); flash("Could not revise schedule."); }
+    if (!confirm(`Revise ${loan.ref || loan.id} from ${fmtDate(parseDate(freqDate))} → ${desc}? Paid installments stay; the remaining balance re-amortizes (${note}).`)) return false;
+    try { await api.setFreqChange(loan.id, fc); await refresh(); setRevFreq(""); setRevTerms(""); flash("Schedule revised."); return true; }
+    catch (e) { console.error(e); flash("Could not revise schedule."); return false; }
   };
   const clearRevision = async loan => {
-    try { await api.setFreqChange(loan.id, null); await refresh(); flash("Revision removed."); }
-    catch (e) { console.error(e); flash("Could not update."); }
+    try { await api.setFreqChange(loan.id, null); await refresh(); flash("Revision removed."); return true; }
+    catch (e) { console.error(e); flash("Could not update."); return false; }
   };
 
   const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
@@ -1784,37 +1785,62 @@ function App() {
               <Badge s={statusData.overallStatus} />
             </div>
 
-            {/* Revise remaining schedule (frequency and/or terms) */}
-            <div className="bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
-              <p className="font-semibold text-slate-800">Revise Remaining Schedule</p>
-              <p className="text-xs text-slate-500">
-                Current: {resolved.loan.frequency} · {resolved.loan.terms} terms
-                {resolved.loan.freqChange && <> → <span className="font-semibold text-emerald-700">{resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? `, ${resolved.loan.freqChange.terms} installments` : ""}</span> from {fmtDate(parseDate(resolved.loan.freqChange.date))}</>}
-              </p>
-              {resolved.loan.freqChange ? (
-                <button onClick={() => clearRevision(resolved.loan)} className="px-3 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Undo revision</button>
-              ) : (<>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className={labelCls}>Effective date</label>
-                    <input type="date" className={inputCls} value={freqDate} onChange={e => setFreqDate(e.target.value)} />
-                  </div>
-                  <div>
-                    <label className={labelCls}>New frequency</label>
-                    <select className={inputCls} value={revFreq} onChange={e => setRevFreq(e.target.value)}>
-                      <option value="">Keep ({resolved.loan.frequency})</option>
-                      <option>Monthly</option><option>Semi-Monthly</option>
-                    </select>
-                  </div>
-                  <div className="col-span-2">
-                    <label className={labelCls}>Remaining installments</label>
-                    <input type="number" inputMode="numeric" className={inputCls} value={revTerms} onChange={e => setRevTerms(e.target.value)} placeholder="leave blank = keep same payoff date" />
-                  </div>
-                  <p className="col-span-2 text-[11px] text-slate-400 -mt-1">Changing the number of installments re-prices the total interest; a frequency-only change keeps the same total.</p>
-                </div>
-                <button onClick={() => applyRevision(resolved.loan)} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Apply revision</button>
-              </>)}
+            {/* Repayment schedule summary — full revise form lives in a modal */}
+            <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs text-slate-400">Repayment schedule</p>
+                <p className="font-semibold text-slate-800 text-sm">
+                  {resolved.loan.frequency} · {resolved.loan.terms} terms
+                  {resolved.loan.freqChange && <span className="text-emerald-700"> → {resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? `, ${resolved.loan.freqChange.terms} installments` : ""} from {fmtDate(parseDate(resolved.loan.freqChange.date))}</span>}
+                </p>
+              </div>
+              <button onClick={() => { setFreqDate(today()); setRevFreq(""); setRevTerms(""); setShowRevise(true); }}
+                className="shrink-0 px-3.5 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">
+                {resolved.loan.freqChange ? "Manage" : "Revise"}
+              </button>
             </div>
+
+            {/* Revise-schedule modal */}
+            {showRevise && (
+              <div className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center p-4 no-print animate-fade-in" onClick={() => setShowRevise(false)}>
+                <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 space-y-4 animate-scale-in" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-slate-800">Revise Remaining Schedule</p>
+                    <button onClick={() => setShowRevise(false)} className="text-slate-400 text-sm font-semibold">Close</button>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Current: {resolved.loan.frequency} · {resolved.loan.terms} terms
+                    {resolved.loan.freqChange && <> → <span className="font-semibold text-emerald-700">{resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? `, ${resolved.loan.freqChange.terms} installments` : ""}</span> from {fmtDate(parseDate(resolved.loan.freqChange.date))}</>}
+                  </p>
+                  {resolved.loan.freqChange ? (
+                    <button onClick={async () => { if (await clearRevision(resolved.loan)) setShowRevise(false); }} className="w-full py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Undo revision</button>
+                  ) : (<>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className={labelCls}>Effective date</label>
+                        <input type="date" className={inputCls} value={freqDate} onChange={e => setFreqDate(e.target.value)} />
+                      </div>
+                      <div>
+                        <label className={labelCls}>New frequency</label>
+                        <select className={inputCls} value={revFreq} onChange={e => setRevFreq(e.target.value)}>
+                          <option value="">Keep ({resolved.loan.frequency})</option>
+                          <option>Monthly</option><option>Semi-Monthly</option>
+                        </select>
+                      </div>
+                      <div className="col-span-2">
+                        <label className={labelCls}>Remaining installments</label>
+                        <input type="number" inputMode="numeric" className={inputCls} value={revTerms} onChange={e => setRevTerms(e.target.value)} placeholder="leave blank = keep same payoff date" />
+                      </div>
+                      <p className="col-span-2 text-[11px] text-slate-400 -mt-1">Changing the number of installments re-prices the total interest; a frequency-only change keeps the same total.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => setShowRevise(false)} className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Cancel</button>
+                      <button onClick={async () => { if (await applyRevision(resolved.loan)) setShowRevise(false); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Apply revision</button>
+                    </div>
+                  </>)}
+                </div>
+              </div>
+            )}
 
             {/* Schedule */}
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
