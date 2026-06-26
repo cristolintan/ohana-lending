@@ -888,6 +888,7 @@ function App() {
 
   // Web Push: state machine — loading | unsupported | ios-hint | denied | off | on
   const [pushState, setPushState] = useState("loading");
+  const [pushEndpoint, setPushEndpoint] = useState(null); // this device's subscription endpoint
   // Deep link from a notification click (e.g. "?loan=OL-0001")
   const [pendingLoanRef, setPendingLoanRef] = useState(() => {
     try { return new URLSearchParams(location.search).get("loan"); } catch { return null; }
@@ -1314,7 +1315,10 @@ function App() {
       try {
         const reg = await navigator.serviceWorker.ready;
         const sub = await reg.pushManager.getSubscription();
-        if (alive) setPushState(sub && Notification.permission === "granted" ? "on" : "off");
+        if (alive) {
+          setPushEndpoint(sub ? sub.endpoint : null);
+          setPushState(sub && Notification.permission === "granted" ? "on" : "off");
+        }
       } catch { if (alive) setPushState("off"); }
     })();
     return () => { alive = false; };
@@ -1328,6 +1332,7 @@ function App() {
       let sub = await reg.pushManager.getSubscription();
       if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
       await api.savePush(sub);
+      setPushEndpoint(sub.endpoint);
       setPushState("on");
       flash("Alerts enabled on this device.");
     } catch (e) { console.error(e); flash("Could not enable alerts."); }
@@ -1337,6 +1342,7 @@ function App() {
       const reg = await navigator.serviceWorker.ready;
       const sub = await reg.pushManager.getSubscription();
       if (sub) { await api.deletePush(sub.endpoint).catch(() => {}); await sub.unsubscribe(); }
+      setPushEndpoint(null);
       setPushState("off");
       flash("Alerts disabled on this device.");
     } catch (e) { console.error(e); flash("Could not disable alerts."); }
@@ -1441,13 +1447,14 @@ function App() {
       const over = statusData ? amt - statusData.grandLeft : 0;
       if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
       else flash(`Logged ${fmt(amt)}`);
-      // Alert other staff that a payment came in (fire-and-forget; never blocks).
+      // Alert every other device that a payment came in — skip only this device
+      // (the one that just posted). The poster's other devices still get it.
       api.notify({
         title: "Payment received",
         body: `${resolved.loan.borrower} paid ${fmt(amt)} · ${resolved.loan.ref}`,
         url: `?loan=${encodeURIComponent(resolved.loan.ref)}`,
         target: "all_staff",
-        exclude: (session && session.user && session.user.id) || null,
+        excludeEndpoint: pushEndpoint,
       });
     } catch (e) { console.error(e); flash("Save failed — check connection."); }
   };
