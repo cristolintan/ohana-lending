@@ -74,23 +74,26 @@ const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r
   flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null, idImage: r.id_image || null });
 const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
 const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
+const rowToQueue = r => ({ id: r.id, borrower: r.borrower, amount: +r.amount, date: r.queue_date, note: r.note || "", status: r.status, createdAt: r.created_at });
 
 // Async CRUD — the React layer will use these instead of loadDb/saveDb.
 const api = {
   async fetchAll() {
-    const [L, P, T, A, S] = await Promise.all([
+    const [L, P, T, A, S, Q] = await Promise.all([
       sb.from("loans").select("*").order("ref"),
       sb.from("payments").select("*"),
       sb.from("transactions").select("*"),
       sb.from("agreements").select("*"),
       sb.from("settings").select("*").limit(1).maybeSingle(),
+      sb.from("queue").select("*"),
     ]);
-    for (const r of [L, P, T, A, S]) if (r.error) throw r.error;
+    for (const r of [L, P, T, A, S, Q]) if (r.error) throw r.error;
     const ag = Object.fromEntries((A.data || []).map(a => [a.loan_id, a.data]));
     return {
       loans: (L.data || []).map(r => ({ ...rowToLoan(r), agreement: ag[r.id] })),
       payments: (P.data || []).map(rowToPay),
       transactions: (T.data || []).map(rowToTx),
+      queue: (Q.data || []).map(rowToQueue),
       settings: { openingBalance: +((S.data && S.data.opening_balance) || 0) },
     };
   },
@@ -111,6 +114,9 @@ const api = {
   async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
   async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
   async delTx(id) { const { error } = await sb.from("transactions").delete().eq("id", id); if (error) throw error; },
+  async addQueue(q) { const { error } = await sb.from("queue").insert({ borrower: q.borrower, amount: q.amount, queue_date: q.date, note: q.note }); if (error) throw error; },
+  async setQueueStatus(id, status) { const { error } = await sb.from("queue").update({ status }).eq("id", id); if (error) throw error; },
+  async delQueue(id) { const { error } = await sb.from("queue").delete().eq("id", id); if (error) throw error; },
   async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
   async setOpening(v) {
     // Singleton shared settings row: update the existing one, else create it.
@@ -156,7 +162,8 @@ function computeStatusBase(loan, allPayments) {
   const rate = Number(loan.flatRate) / 100;
   const multiplier = loan.frequency === "Monthly" ? 2 : 1;
   const totalInterest = pAmt * rate * terms * multiplier;
-  const intDrop = (pAmt * 0.03) / terms;
+  const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
+  const intDrop = (pAmt * drop) / terms;
   const pays = allPayments.filter(p => p.loanId === loan.id).sort((a, b) => a.date < b.date ? -1 : 1);
   const totalLogged = pays.reduce((s, p) => s + Number(p.amount), 0);
   const extCount = pays.filter(p => p.type === "Minimum Due").length;
@@ -216,7 +223,8 @@ function computeStatus(loan, allPayments) {
   // Changing the term re-prices interest on the remaining balance (more terms = more
   // interest). A frequency-only change keeps the original remaining interest.
   const remI = explicitTerms ? remP * rate * n * mult(F1) : after.reduce((s, r) => s + r.interest, 0);
-  const avgI = remI / n, dropR = (remP * 0.03) / n;   // diminishing model, scaled to the remainder
+  const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
+  const avgI = remI / n, dropR = (remP * drop) / n;   // diminishing model, scaled to the remainder
   const rem = [];
   for (let i = 0; i < n; i++) {
     let due;
@@ -822,7 +830,7 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
-  const [db, setDb] = useState({ loans: [], payments: [], transactions: [], settings: {} });
+  const [db, setDb] = useState({ loans: [], payments: [], transactions: [], queue: [], settings: {} });
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -849,6 +857,13 @@ function App() {
   const [txAmount, setTxAmount] = useState("");
   const [txNote, setTxNote] = useState("");
   const [openingInput, setOpeningInput] = useState(() => String((db.settings && db.settings.openingBalance) || ""));
+
+  // Borrower queue inputs
+  const [qBorrower, setQBorrower] = useState("");
+  const [qAmount, setQAmount] = useState("");
+  const [qDate, setQDate] = useState(today());
+  const [qNote, setQNote] = useState("");
+  const [fundingQueueId, setFundingQueueId] = useState(null); // queue entry being turned into a loan
 
   // Calc inputs
   const [name, setName] = useState("");
@@ -906,7 +921,7 @@ function App() {
 
   const calc = useMemo(() => computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }), [amount, terms, flatRate, frequency, startDate, dropRate]);
 
-  const resetForm = () => { setEditId(null); setName(""); setAmount(10000); setTerms(6); setFlatRate(3.6); setFrequency("Semi-Monthly"); setStartDate(today()); setDropRate(3.6); };
+  const resetForm = () => { setEditId(null); setFundingQueueId(null); setName(""); setAmount(10000); setTerms(6); setFlatRate(3.6); setFrequency("Semi-Monthly"); setStartDate(today()); setDropRate(3.6); };
 
   const exportSchedulePng = async () => {
     const el = document.getElementById("projected-export");
@@ -922,6 +937,7 @@ function App() {
 
   const editLoan = l => {
     setEditId(l.id);
+    setFundingQueueId(null);
     setName(l.borrower);
     setAmount(l.amount);
     setTerms(l.terms);
@@ -951,6 +967,13 @@ function App() {
         const nums = db.loans.map(l => parseInt((l.ref || "").split("-")[1], 10)).filter(x => !isNaN(x));
         const ref = "OL-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
         await api.createLoan({ ref, borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate });
+        // Mark the queued borrower funded — only if this loan really is for them.
+        if (fundingQueueId) {
+          const fq = (db.queue || []).find(q => q.id === fundingQueueId);
+          if (fq && fq.borrower.toLowerCase() === borrower.toLowerCase()) {
+            try { await api.setQueueStatus(fundingQueueId, "funded"); } catch (e) { console.error(e); }
+          }
+        }
         flash(`Saved ${ref} — ${borrower}`);
       }
       await refresh();
@@ -1151,6 +1174,71 @@ function App() {
     return { collected, disbursed, net, interest, expected, expectedCount: projected.length, ledger, months, position, opening, balance: bal };
   }, [db.loans, db.payments, db.transactions, db.settings, cfRange, cfDir, cfProjected]);
 
+  // Borrower queue, ordered earliest-first. Walk the line and mark each entry
+  // "ready to fund" while the cumulative requested amount still fits cash on hand.
+  const queueView = useMemo(() => {
+    const cash = cashflow.balance;
+    const all = db.queue || [];
+    const waiting = all.filter(q => q.status !== "funded")
+      .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt < b.createdAt ? -1 : 1));
+    let cum = 0;
+    const rows = waiting.map((q, i) => {
+      cum += Number(q.amount) || 0;
+      return { ...q, position: i + 1, cumulative: cum, ready: cum <= cash };
+    });
+    const funded = all.filter(q => q.status === "funded")
+      .sort((a, b) => a.date < b.date ? 1 : -1);
+    return {
+      cash, rows, funded,
+      readyCount: rows.filter(r => r.ready).length,
+      totalRequested: rows.reduce((s, r) => s + (Number(r.amount) || 0), 0),
+    };
+  }, [db.queue, cashflow.balance]);
+
+  const addQueueEntry = async () => {
+    const borrower = qBorrower.trim();
+    const amt = Number(qAmount);
+    if (!borrower) { flash("Enter the borrower's name."); return; }
+    if (!(amt > 0)) { flash("Amount must be greater than 0."); return; }
+    if (!qDate) { flash("Pick a queue date."); return; }
+    try {
+      await api.addQueue({ borrower, amount: amt, date: qDate, note: qNote.trim() });
+      await refresh();
+      setQBorrower(""); setQAmount(""); setQNote(""); setQDate(today());
+      flash(`${borrower} added to the queue.`);
+    } catch (e) { console.error(e); flash("Save failed — check connection."); }
+  };
+
+  const deleteQueueEntry = async id => {
+    try { await api.delQueue(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); }
+  };
+
+  const markQueueFunded = async id => {
+    try { await api.setQueueStatus(id, "funded"); await refresh(); flash("Marked as funded."); }
+    catch (e) { console.error(e); flash("Update failed."); }
+  };
+
+  const requeue = async id => {
+    try { await api.setQueueStatus(id, "waiting"); await refresh(); flash("Moved back to the queue."); }
+    catch (e) { console.error(e); flash("Update failed."); }
+  };
+
+  // Prefill the New Loan form from a queue entry; the entry is marked funded
+  // once the loan is actually saved (see saveLoan).
+  const fundFromQueue = entry => {
+    setEditId(null);
+    setName(entry.borrower);
+    setAmount(entry.amount);
+    setTerms(6);
+    setFlatRate(3.6);
+    setDropRate(3.6);
+    setFrequency("Semi-Monthly");
+    setStartDate(today());
+    setFundingQueueId(entry.id);
+    setTab("new");
+    flash(`Funding ${entry.borrower} — review and save the loan.`);
+  };
+
   const exportCsv = () => {
     const esc = v => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const header = ["Date", "Type", "Detail", "Loan ID", "Borrower", "Inflow", "Outflow", "Balance"];
@@ -1261,6 +1349,7 @@ function App() {
   const navItems = [
     { id: "new",     label: "New Loan",  icon: "calculator" },
     { id: "records", label: "Records",   icon: "file-text" },
+    { id: "queue",   label: "Queue",     icon: "users" },
     { id: "status",  label: "Payments & Status",  icon: "wallet" },
     { id: "cashflow", label: "Cash Flow", icon: "trending-up" },
   ];
@@ -1722,6 +1811,91 @@ function App() {
               </div>
             )}
           </div>
+        </>)}
+
+        {/* ── BORROWER QUEUE ── */}
+        {tab === "queue" && (<>
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+            <p className="font-bold text-slate-700">Borrower Queue</p>
+            <p className="text-s text-slate-400">Borrowers fall in line by date. As cash builds up, the earliest in line become ready to fund.</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Stat label="Cash on Hand" value={fmt(queueView.cash)} tone={queueView.cash >= 0 ? "emerald" : "red"} />
+              <Stat label="Ready to Fund" value={`${queueView.readyCount} of ${queueView.rows.length}`} tone="teal" />
+            </div>
+            {queueView.rows.length > 0 &&
+              <p className="text-s text-slate-400">Total requested in line: <span className="font-semibold text-slate-600">{fmt(queueView.totalRequested)}</span></p>}
+          </div>
+
+          {/* Add to queue */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+            <p className="font-bold text-slate-700">Add to Queue</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2">
+                <label className={labelCls}>Borrower</label>
+                <input className={inputCls} value={qBorrower} onChange={e => setQBorrower(e.target.value)} placeholder="Full name" />
+              </div>
+              <div>
+                <label className={labelCls}>Requested Amount</label>
+                <input type="number" inputMode="decimal" className={inputCls} value={qAmount} onChange={e => setQAmount(e.target.value)} placeholder="0.00" />
+              </div>
+              <div>
+                <label className={labelCls}>Queue Date</label>
+                <input type="date" className={inputCls} value={qDate} onChange={e => setQDate(e.target.value)} />
+              </div>
+              <div className="col-span-2">
+                <label className={labelCls}>Note / Purpose</label>
+                <input className={inputCls} value={qNote} onChange={e => setQNote(e.target.value)} placeholder="Optional" />
+              </div>
+            </div>
+            <button onClick={addQueueEntry} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Add to Queue</button>
+          </div>
+
+          {/* Waiting line */}
+          {queueView.rows.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400 text-sm">The queue is empty. Add a borrower above.</div>
+          ) : queueView.rows.map(q => (
+            <div key={q.id} className={`bg-white rounded-2xl border p-4 space-y-3 shadow-sm ${q.ready ? "border-emerald-300" : "border-slate-200"}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3 min-w-0">
+                  <div className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-sm font-bold ${q.ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{q.position}</div>
+                  <div className="min-w-0">
+                    <p className="font-bold text-slate-700 truncate">{q.borrower}</p>
+                    <p className="text-s text-slate-400">{fmtDate(parseDate(q.date))}{q.note ? ` · ${q.note}` : ""}</p>
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="font-bold text-slate-700">{fmt(q.amount)}</p>
+                  <span className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${q.ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{q.ready ? "Ready to fund" : "Waiting"}</span>
+                </div>
+              </div>
+              {!q.ready &&
+                <p className="text-s text-amber-600">Needs {fmt(Math.max(0, q.cumulative - queueView.cash))} more cash on hand (line total to here: {fmt(q.cumulative)}).</p>}
+              <div className="flex gap-2">
+                <button onClick={() => fundFromQueue(q)} className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition ${q.ready ? "bg-emerald-600 active:bg-emerald-800 text-white" : "border border-emerald-300 active:bg-emerald-50 text-emerald-700"}`}>Fund →</button>
+                <button onClick={() => markQueueFunded(q.id)} className="px-3.5 py-2.5 rounded-xl border border-slate-300 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Mark funded</button>
+                <button onClick={() => deleteQueueEntry(q.id)} className="px-3.5 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Remove</button>
+              </div>
+            </div>
+          ))}
+
+          {/* Funded history */}
+          {queueView.funded.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-2 shadow-sm">
+              <p className="font-bold text-slate-700">Funded</p>
+              {queueView.funded.map(q => (
+                <div key={q.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-s">
+                  <div className="min-w-0">
+                    <span className="font-semibold text-slate-600">{q.borrower}</span>
+                    <span className="text-slate-400"> · {fmt(q.amount)} · {fmtDate(parseDate(q.date))}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => requeue(q.id)} className="text-emerald-600 font-semibold">Re-queue</button>
+                    <button onClick={() => deleteQueueEntry(q.id)} className="text-red-400 text-base leading-none">×</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </>)}
 
         {/* ── LOAN AGREEMENT ── */}
