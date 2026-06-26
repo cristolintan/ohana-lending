@@ -1,0 +1,10 @@
+project_id = "hjlibhrxyfipsajcywzj"
+
+# send-push is called from the browser by logged-in staff → keep JWT verification on.
+[functions.send-push]
+verify_jwt = true
+
+# overdue-check is called only by the daily cron job (server-to-server). It is
+# protected by the CRON_SECRET header instead, so JWT verification is disabled.
+[functions.overdue-check]
+verify_jwt = false
