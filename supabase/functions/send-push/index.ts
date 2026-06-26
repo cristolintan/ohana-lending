@@ -1,8 +1,10 @@
 // send-push — the single entry point for delivering an internal staff alert.
 //
-// POST body: { title, body?, url?, target?, exclude?, icon?, tag? }
-//   target:  a specific user_id, or "all_staff" (default) → everyone subscribed.
-//   exclude: optional user_id to skip (e.g. the staff member who triggered it).
+// POST body: { title, body?, url?, target?, exclude?, excludeEndpoint?, icon?, tag? }
+//   target:          a specific user_id, or "all_staff" (default) → everyone subscribed.
+//   exclude:         optional user_id to skip (all of that user's devices).
+//   excludeEndpoint: optional single device endpoint to skip (e.g. the exact
+//                    device that triggered the event — its other devices still get it).
 //
 // Called by:
 //   • the PWA (logged-in staff)            → JWT verified by the platform.
@@ -16,7 +18,7 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
   try {
-    const { title, body, url, target, exclude, icon, tag } = await req.json();
+    const { title, body, url, target, exclude, excludeEndpoint, icon, tag } = await req.json();
     if (!title) return json({ error: "title is required" }, 400);
 
     const admin = createClient(
@@ -36,6 +38,7 @@ Deno.serve(async (req) => {
 
     let subs = (data || []) as SubRow[];
     if (exclude) subs = subs.filter((s) => s.user_id !== exclude);
+    if (excludeEndpoint) subs = subs.filter((s) => s.endpoint !== excludeEndpoint);
     if (!subs.length) return json({ sent: 0, removed: 0, note: "no matching subscriptions" });
 
     const result = await sendToSubs(admin, subs, {
