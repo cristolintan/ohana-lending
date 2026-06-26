@@ -154,28 +154,18 @@ const api = {
 };
 
 // ─── Finance logic ───────────────────────────────────────────────────────────
+// Projected schedule for a brand-new (unpaid) loan, shown in the New Loan
+// preview and the printed Loan Agreement. Delegates to the SAME engine the
+// Payments tab uses (computeStatusBase with no payments) so the projection and
+// the live status schedule always agree — one interest model, no drift.
 function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }) {
   const pAmt = Number(amount) || 0, n = Math.max(0, Math.floor(Number(terms) || 0));
-  const rate = (Number(flatRate) || 0) / 100, drop = (Number(dropRate) || 0) / 100;
   if (pAmt <= 0 || n <= 0) return { rows: [], totalInterest: 0, totalRepay: pAmt };
-  const multiplier = frequency === "Monthly" ? 2 : 1;
-  const totalInterest = pAmt * rate * n * multiplier;
-  const baseP = round2(pAmt / n);
-  const remCents = Math.round(round2(pAmt - baseP * n) * 100);
-  const avgInterest = totalInterest / n, intDrop = (pAmt * drop) / n;
-  const sd = parseDate(startDate);
-  const rows = [];
-  for (let m = 1; m <= n; m++) {
-    const prevRem = m === 1 ? pAmt : rows[m-2].remaining - rows[m-2].principal;
-    const pPaid = m <= remCents ? baseP + 0.01 : baseP;
-    const intPaid = avgInterest + ((n + 1) / 2 - m) * intDrop;
-    const step = m - 1;
-    let due;
-    if (frequency === "Monthly") due = edate(sd, step);
-    else due = step % 2 === 0 ? edate(sd, step / 2) : addDays(edate(sd, (step - 1) / 2), 15);
-    rows.push({ period: m, remaining: prevRem, principal: pPaid, interest: intPaid, total: pPaid + intPaid, due });
-  }
-  return { rows, totalInterest, totalRepay: pAmt + totalInterest };
+  const st = computeStatusBase(
+    { amount: pAmt, terms: n, flatRate, frequency, startDate, dropRate: dropRate != null ? dropRate : flatRate },
+    []
+  );
+  return { rows: st.rows, totalInterest: st.summedInterest, totalRepay: pAmt + st.summedInterest };
 }
 
 function computeStatusBase(loan, allPayments) {
@@ -217,7 +207,7 @@ function computeStatusBase(loan, allPayments) {
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
   const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
-  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft === 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
+  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0.005 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
 // Wraps the schedule engine. If the loan has a mid-stream frequency change
@@ -2016,7 +2006,6 @@ function App() {
                   </tr></thead>
                   <tbody>
                     {cashflow.ledger.map(t => (
-                      console.log(t),
                       <tr key={t.id} onClick={() => { if (t.ref) { setLoanIdOvr(t.ref); setSelBorrower(""); setTab("status"); } }} className={`border-t border-slate-100 ${t.loanId ? "active:bg-slate-50 cursor-pointer" : ""} ${t.projected ? "opacity-60" : ""}`}>
                         <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(parseDate(t.date))}</td>
                         <td className="px-3 py-2">
