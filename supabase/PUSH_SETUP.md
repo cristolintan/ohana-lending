@@ -52,7 +52,13 @@ supabase secrets set \
 
 ---
 
-## 3. Deploy the functions
+## 3. Deploy the functions ✅ DONE (deployed via MCP)
+
+Both functions are already deployed and ACTIVE:
+- `send-push` (verify_jwt = true)
+- `overdue-check` (verify_jwt = false)
+
+To redeploy later from your machine:
 
 ```bash
 supabase functions deploy send-push                  # JWT-verified (called by staff)
@@ -72,9 +78,11 @@ curl -i -X POST "https://hjlibhrxyfipsajcywzj.supabase.co/functions/v1/send-push
 
 ---
 
-## 4. Schedule the daily overdue check (pg_cron + pg_net)
+## 4. Schedule the daily overdue check ✅ DONE (scheduled via MCP)
 
-Dashboard → **SQL Editor**, run once:
+`pg_cron` + `pg_net` are enabled and the job `daily-overdue-check` is active
+(runs 01:00 UTC = 09:00 Asia/Manila). It already carries the CRON_SECRET below.
+For reference, this is what was run:
 
 ```sql
 create extension if not exists pg_cron;
