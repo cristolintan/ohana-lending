@@ -60,6 +60,106 @@ function saveDb(db) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(db)); } catch (e) { console.error(e); }
 }
 
+// ─── Offline snapshot ─────────────────────────────────────────────────────────
+// Last known-good server state, kept so a cold launch with no signal still shows
+// real loans, dues and schedules instead of an empty shell. Heavy blobs (ID
+// photos, agreement forms) are stripped: they'd blow past the localStorage quota
+// and aren't needed for collections work in the field.
+const SNAP_KEY = "ohana_snapshot_v1";
+function loadSnapshot() {
+  try { const v = localStorage.getItem(SNAP_KEY); return v ? JSON.parse(v) : null; }
+  catch { return null; }
+}
+function saveSnapshot(db) {
+  try {
+    localStorage.setItem(SNAP_KEY, JSON.stringify({
+      ...db,
+      loans: (db.loans || []).map(({ idImage, agreement, ...l }) => l),
+      savedAt: new Date().toISOString(),
+    }));
+  } catch (e) { console.warn("snapshot skipped", e); }   // quota / private mode
+}
+
+// ─── Offline outbox (IndexedDB, localStorage fallback) ────────────────────────
+// Writes made without a connection are queued here and replayed when the network
+// comes back. Every queued row carries a client-generated UUID, so replaying an
+// item that actually landed is a primary-key conflict (23505) rather than a
+// duplicate payment — retries are safe by construction.
+const OUTBOX_DB = "ohana-offline", OUTBOX_STORE = "outbox", OUTBOX_LS = "ohana_outbox_v1";
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
+  : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+    }));
+
+function openOutbox() {
+  return new Promise((resolve, reject) => {
+    if (!self.indexedDB) return reject(new Error("no indexedDB"));
+    const req = indexedDB.open(OUTBOX_DB, 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains(OUTBOX_STORE)) d.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+const lsOutbox = {
+  all() { try { return JSON.parse(localStorage.getItem(OUTBOX_LS) || "[]"); } catch { return []; } },
+  write(list) { try { localStorage.setItem(OUTBOX_LS, JSON.stringify(list)); } catch {} },
+};
+const outbox = {
+  async all() {
+    try {
+      const d = await openOutbox();
+      return await new Promise((res, rej) => {
+        const r = d.transaction(OUTBOX_STORE, "readonly").objectStore(OUTBOX_STORE).getAll();
+        r.onsuccess = () => res(r.result || []);
+        r.onerror = () => rej(r.error);
+      });
+    } catch { return lsOutbox.all(); }
+  },
+  async put(item) {
+    try {
+      const d = await openOutbox();
+      await new Promise((res, rej) => {
+        const tx = d.transaction(OUTBOX_STORE, "readwrite");
+        tx.objectStore(OUTBOX_STORE).put(item);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      });
+    } catch {
+      const list = lsOutbox.all().filter(i => i.id !== item.id);
+      lsOutbox.write([...list, item]);
+    }
+    return item;
+  },
+  async remove(id) {
+    try {
+      const d = await openOutbox();
+      await new Promise((res, rej) => {
+        const tx = d.transaction(OUTBOX_STORE, "readwrite");
+        tx.objectStore(OUTBOX_STORE).delete(id);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      });
+    } catch { lsOutbox.write(lsOutbox.all().filter(i => i.id !== id)); }
+  },
+};
+
+// Ask the browser to replay the queue in the background (Chromium/Android).
+// Safari has no Background Sync — those devices flush on "online" / next launch.
+async function requestOutboxSync() {
+  try {
+    if (!("serviceWorker" in navigator) || !("SyncManager" in window)) return;
+    const reg = await navigator.serviceWorker.ready;
+    await reg.sync.register("ohana-outbox");
+  } catch (e) { console.warn("sync register failed", e); }
+}
+
+// "The request never reached the server" — as opposed to a rejection (RLS,
+// validation) that replaying would only repeat.
+const isNetworkError = e =>
+  !navigator.onLine ||
+  (e && (e.name === "TypeError" || /failed to fetch|networkerror|network request failed|load failed/i.test(String(e.message || ""))));
+
 // ─── Supabase data layer ──────────────────────────────────────────────────────
 const SUPABASE_URL = "https://hjlibhrxyfipsajcywzj.supabase.co";
 const SUPABASE_KEY = "sb_publishable_6mSMEHYq3OrTl-sXlys_IQ_IDtmiFBo"; // publishable — safe with RLS
@@ -125,9 +225,17 @@ const api = {
   async deleteLoan(id) { const { error } = await sb.from("loans").delete().eq("id", id); if (error) throw error; },
   async setFreqChange(id, fc) { const { error } = await sb.from("loans").update({ freq_change: fc }).eq("id", id); if (error) throw error; },
   async setIdImage(id, dataUrl) { const { error } = await sb.from("loans").update({ id_image: dataUrl }).eq("id", id); if (error) throw error; },
-  async addPayment(p) { const { error } = await sb.from("payments").insert({ loan_id: p.loanId, date: p.date, amount: p.amount, type: p.type }); if (error) throw error; },
+  // Insert with a client-supplied id: a replayed offline payment collides on the
+  // primary key (23505) instead of creating a second row.
+  async addPayment(p) {
+    const { error } = await sb.from("payments").insert({ id: p.id || uuid(), loan_id: p.loanId, date: p.date, amount: p.amount, type: p.type });
+    if (error && error.code !== "23505") throw error;
+  },
   async delPayment(id) { const { error } = await sb.from("payments").delete().eq("id", id); if (error) throw error; },
-  async addTx(t) { const { error } = await sb.from("transactions").insert({ date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note }); if (error) throw error; },
+  async addTx(t) {
+    const { error } = await sb.from("transactions").insert({ id: t.id || uuid(), date: t.date, kind: t.kind, direction: t.direction, amount: t.amount, note: t.note });
+    if (error && error.code !== "23505") throw error;
+  },
   async delTx(id) { const { error } = await sb.from("transactions").delete().eq("id", id); if (error) throw error; },
   async savePush(sub) {
     const j = sub.toJSON();
@@ -138,7 +246,17 @@ const api = {
   async deletePush(endpoint) { const { error } = await sb.from("push_subscriptions").delete().eq("endpoint", endpoint); if (error) throw error; },
   // Fire an internal staff alert via the send-push Edge Function (never blocks the caller).
   async notify(payload) { try { await sb.functions.invoke("send-push", { body: payload }); } catch (e) { console.error("notify failed", e); } },
-  async addQueue(q) { const { error } = await sb.from("queue").insert({ borrower: q.borrower, amount: q.amount, queue_date: q.date, note: q.note }); if (error) throw error; },
+  async addQueue(q) {
+    const { error } = await sb.from("queue").insert({ id: q.id || uuid(), borrower: q.borrower, amount: q.amount, queue_date: q.date, note: q.note });
+    if (error && error.code !== "23505") throw error;
+  },
+  // Replay one queued write. Kinds map 1:1 to the api methods above.
+  async applyQueued(item) {
+    if (item.kind === "payment") return api.addPayment(item.payload);
+    if (item.kind === "tx") return api.addTx(item.payload);
+    if (item.kind === "queue") return api.addQueue(item.payload);
+    throw new Error(`unknown outbox kind: ${item.kind}`);
+  },
   async setQueueStatus(id, status) { const { error } = await sb.from("queue").update({ status }).eq("id", id); if (error) throw error; },
   async delQueue(id) { const { error } = await sb.from("queue").delete().eq("id", id); if (error) throw error; },
   async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
@@ -885,7 +1003,13 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
-  const [db, setDb] = useState({ loans: [], payments: [], transactions: [], queue: [], settings: {} });
+  // Hydrate from the offline snapshot so a cold start with no signal paints real
+  // data immediately; the network refresh overwrites it moments later.
+  const [db, setDb] = useState(() => {
+    const snap = loadSnapshot();
+    const empty = { loans: [], payments: [], transactions: [], queue: [], settings: {} };
+    return snap ? { ...empty, ...snap } : empty;
+  });
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -950,14 +1074,35 @@ function App() {
   const [revTerms, setRevTerms] = useState("");
   const [reviseOpen, setReviseOpen] = useState(false); // schedule revision lives in a modal
 
+  // ── PWA state: connectivity, offline queue, install, update ──
+  const [online, setOnline] = useState(() => navigator.onLine);
+  const [queued, setQueued] = useState([]);        // outbox items awaiting sync
+  const [syncing, setSyncing] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState(null);   // deferred beforeinstallprompt
+  const [installed, setInstalled] = useState(() =>
+    window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true);
+  const [installDismissed, setInstallDismissed] = useState(() => {
+    const at = Number(localStorage.getItem("ohana_install_snooze") || 0);
+    return Date.now() - at < 14 * 24 * 3600 * 1000;            // snooze "Not now" for 2 weeks
+  });
+  const [updateReady, setUpdateReady] = useState(false);
+
   const flash = msg => { setToast(msg); setTimeout(() => setToast(""), 2500); };
-  const refresh = useCallback(async () => { const data = await api.fetchAll(); setDb(data); return data; }, []);
+  const refresh = useCallback(async () => {
+    const data = await api.fetchAll();
+    setDb(data);
+    return data;
+  }, []);
 
   // Auth gate: require a real (non-anonymous) login. Records are shared across all
   // logged-in users. Data loads only once a session exists.
   const loadShared = useCallback(async () => {
     try { const d = await refresh(); setOpeningInput(String(d.settings.openingBalance || "")); }
-    catch (e) { console.error(e); flash("Could not load data — check connection."); }
+    catch (e) {
+      console.error(e);
+      // The snapshot is already on screen — say what's showing instead of failing blank.
+      flash(loadSnapshot() ? "Offline — showing last synced data." : "Could not load data — check connection.");
+    }
     finally { setLoading(false); }
   }, [refresh]);
 
@@ -971,7 +1116,23 @@ function App() {
       setSession(s);
       if (!isUser(s)) { setApproved(false); setIsAdmin(false); setLoading(false); setAuthReady(true); return; }
       let ok = false, admin = false;
-      try { const r = await Promise.all([sb.rpc("is_approved"), sb.rpc("is_admin")]); ok = !!r[0].data; admin = !!r[1].data; } catch (e) { console.error(e); }
+      const accessKey = `ohana_access_${s.user.id}`;
+      try {
+        const [ap, ad] = await Promise.all([sb.rpc("is_approved"), sb.rpc("is_admin")]);
+        if (ap.error || ad.error) throw (ap.error || ad.error);
+        ok = !!ap.data; admin = !!ad.data;
+        try { localStorage.setItem(accessKey, JSON.stringify({ ok, admin })); } catch {}
+      } catch (e) {
+        // The access check needs the network. Offline, fall back to the last
+        // known answer so staff aren't locked out of their own records in the
+        // field. This only unlocks the local UI — every read and write is still
+        // enforced server-side by RLS, so a revoked account gains nothing.
+        console.error(e);
+        try {
+          const cached = JSON.parse(localStorage.getItem(accessKey) || "null");
+          if (cached) { ok = !!cached.ok; admin = !!cached.admin; }
+        } catch {}
+      }
       if (!mounted) return;
       setApproved(ok); setIsAdmin(admin);
       if (ok) await loadShared(); else setLoading(false);
@@ -980,6 +1141,124 @@ function App() {
     const { data: { subscription } } = sb.auth.onAuthStateChange((_e, s) => { apply(s); });
     return () => { mounted = false; subscription.unsubscribe(); };
   }, [loadShared]);
+
+  // ─── Offline queue ──────────────────────────────────────────────────────────
+  // Writes that can't reach Supabase are parked in the outbox and replayed on
+  // reconnect. Replay only runs for an approved session, so a queued row is never
+  // fired at the server before RLS can accept it.
+  const flushing = useRef(false);
+  const approvedRef = useRef(false);
+  useEffect(() => { approvedRef.current = approved; }, [approved]);
+
+  const reloadQueue = useCallback(async () => { setQueued(await outbox.all()); }, []);
+
+  const flushOutbox = useCallback(async () => {
+    if (flushing.current || !navigator.onLine || !approvedRef.current) return;
+    const items = await outbox.all();
+    if (!items.length) { setQueued([]); return; }
+    flushing.current = true; setSyncing(true);
+    let done = 0, rejected = 0;
+    // Oldest first — payments should land in the order they were taken.
+    for (const item of items.slice().sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))) {
+      try { await api.applyQueued(item); await outbox.remove(item.id); done++; }
+      catch (e) {
+        console.error("outbox replay failed", item, e);
+        if (isNetworkError(e)) break;                       // signal dropped again — keep the rest
+        await outbox.put({ ...item, attempts: (item.attempts || 0) + 1, lastError: String(e.message || e) });
+        rejected++;
+      }
+    }
+    flushing.current = false; setSyncing(false);
+    await reloadQueue();
+    if (done) {
+      try { await refresh(); } catch (e) { console.error(e); }
+      flash(`Synced ${done} offline ${done === 1 ? "entry" : "entries"}.`);
+    }
+    if (rejected) flash(`${rejected} queued ${rejected === 1 ? "entry was" : "entries were"} rejected by the server.`);
+  }, [refresh, reloadQueue]);
+
+  // Queue a write and reflect it locally right away, so the schedule, balances
+  // and dues stay truthful while offline. The optimistic row carries the same id
+  // the server row will get, so the post-sync refresh can't duplicate it.
+  const enqueue = useCallback(async (kind, payload, optimistic) => {
+    await outbox.put({ id: uuid(), kind, payload, createdAt: new Date().toISOString(), attempts: 0 });
+    await reloadQueue();
+    requestOutboxSync();
+    if (optimistic) setDb(prev => optimistic(prev));
+  }, [reloadQueue]);
+
+  // Drop a row that never made it to the server (outbox + local copy).
+  const discardQueued = useCallback(async (collection, rowId) => {
+    const item = (await outbox.all()).find(q => q.payload && q.payload.id === rowId);
+    if (item) await outbox.remove(item.id);
+    await reloadQueue();
+    setDb(prev => ({ ...prev, [collection]: (prev[collection] || []).filter(r => r.id !== rowId) }));
+  }, [reloadQueue]);
+
+  // Connectivity: replay on reconnect, and once the session is approved.
+  useEffect(() => {
+    const goOnline = () => { setOnline(true); flushOutbox(); };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, [flushOutbox]);
+  useEffect(() => { reloadQueue(); }, [reloadQueue]);
+  useEffect(() => { if (approved && online) flushOutbox(); }, [approved, online, flushOutbox]);
+
+  // Keep the offline snapshot in step with whatever is on screen — server
+  // refreshes and offline writes alike. Skipped during the initial load so a
+  // failed first fetch can't overwrite good data with an empty shell.
+  useEffect(() => { if (!loading) saveSnapshot(db); }, [db, loading]);
+
+  // ─── Install prompt ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onPrompt = e => { e.preventDefault(); setInstallPrompt(e); };
+    const onInstalled = () => { setInstalled(true); setInstallPrompt(null); flash("Installed — open Ohana from your home screen."); };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    const mq = window.matchMedia("(display-mode: standalone)");
+    const onMode = e => setInstalled(e.matches);
+    if (mq.addEventListener) mq.addEventListener("change", onMode); else mq.addListener(onMode);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+      if (mq.removeEventListener) mq.removeEventListener("change", onMode); else mq.removeListener(onMode);
+    };
+  }, []);
+
+  const snoozeInstall = () => {
+    try { localStorage.setItem("ohana_install_snooze", String(Date.now())); } catch {}
+    setInstallDismissed(true);
+  };
+  const runInstall = async () => {
+    if (!installPrompt) return;
+    try {
+      installPrompt.prompt();
+      const { outcome } = await installPrompt.userChoice;
+      if (outcome !== "accepted") snoozeInstall();
+    } catch (e) { console.error(e); }
+    setInstallPrompt(null);
+  };
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const showInstallCard = !installed && !installDismissed && (!!installPrompt || isIos);
+
+  // ─── App update ─────────────────────────────────────────────────────────────
+  // index.html registers the worker and fires this event when a new version is
+  // downloaded and waiting. Nothing swaps until the user taps Update.
+  useEffect(() => {
+    const onReady = () => setUpdateReady(true);
+    window.addEventListener("sw-update-ready", onReady);
+    if (window.__swWaiting) setUpdateReady(true);
+    return () => window.removeEventListener("sw-update-ready", onReady);
+  }, []);
+  const applyUpdate = () => {
+    const waiting = window.__swWaiting || (window.__swRegistration && window.__swRegistration.waiting);
+    setUpdateReady(false);
+    if (!waiting) { window.location.reload(); return; }
+    waiting.postMessage({ type: "SKIP_WAITING" });   // controllerchange → index.html reloads
+    flash("Updating…");
+  };
 
   const sym = "₱";
   const fmt = v => sym + Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1045,7 +1324,12 @@ function App() {
       await refresh();
       resetForm();
       setTab("records");
-    } catch (e) { console.error(e); flash("Save failed — check connection."); }
+    } catch (e) {
+      console.error(e);
+      // Loans aren't queued offline on purpose: the OL-#### ref is derived from
+      // the current list, so two disconnected devices would mint the same one.
+      flash(isNetworkError(e) ? "Loans need a connection — reconnect and try again." : "Save failed — check connection.");
+    }
   };
 
   const deleteLoan = async (id, ref) => {
@@ -1111,7 +1395,17 @@ function App() {
     } catch (e) { console.error(e); setAuthMsg(e.message || "Could not create account."); }
     finally { setAuthBusy(false); }
   };
-  const signOut = async () => { try { await sb.auth.signOut(); flash("Signed out."); } catch (e) { console.error(e); flash("Sign out failed."); } };
+  const signOut = async () => {
+    // Unsynced work would sit invisible until someone signs in again — say so first.
+    if (queued.length && !confirm(`${queued.length} entr${queued.length === 1 ? "y hasn't" : "ies haven't"} synced yet. Sign out anyway? They stay on this device and sync at the next sign-in.`)) return;
+    try {
+      await sb.auth.signOut();
+      // Don't leave borrower records cached on a signed-out device.
+      try { localStorage.removeItem(SNAP_KEY); } catch {}
+      setDb({ loans: [], payments: [], transactions: [], queue: [], settings: {} });
+      flash("Signed out.");
+    } catch (e) { console.error(e); flash("Sign out failed."); }
+  };
 
   // ── Admin: manage who can access (allowlist) ──
   const loadAdmin = async () => {
@@ -1308,19 +1602,34 @@ function App() {
     if (!borrower) { flash("Enter the borrower's name."); return; }
     if (!(amt > 0)) { flash("Amount must be greater than 0."); return; }
     if (!qDate) { flash("Pick a queue date."); return; }
+    const row = { id: uuid(), borrower, amount: amt, date: qDate, note: qNote.trim() };
+    const clear = () => { setQBorrower(""); setQAmount(""); setQNote(""); setQDate(today()); };
     try {
-      await api.addQueue({ borrower, amount: amt, date: qDate, note: qNote.trim() });
+      await api.addQueue(row);
       await refresh();
-      setQBorrower(""); setQAmount(""); setQNote(""); setQDate(today());
+      clear();
       flash(`${borrower} added to the queue.`);
-    } catch (e) { console.error(e); flash("Save failed — check connection."); }
+    } catch (e) {
+      if (!isNetworkError(e)) { console.error(e); flash("Save failed — the server rejected it."); return; }
+      await enqueue("queue", row, prev => ({
+        ...prev,
+        queue: [...(prev.queue || []), { ...row, status: "waiting", createdAt: new Date().toISOString(), pending: true }],
+      }));
+      clear();
+      flash(`${borrower} queued offline — syncs when you're back online.`);
+    }
   };
 
-  const deleteQueueEntry = async id => {
+  const deleteQueueEntry = async entry => {
+    if (entry && entry.pending) { await discardQueued("queue", entry.id); flash("Queued entry discarded."); return; }
+    const id = entry && entry.id ? entry.id : entry;
     try { await api.delQueue(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); }
   };
 
-  const markQueueFunded = async id => {
+  const markQueueFunded = async entry => {
+    // A row that hasn't reached the server yet can't be updated there.
+    if (entry && entry.pending) { flash("Wait for this entry to sync first."); return; }
+    const id = entry && entry.id ? entry.id : entry;
     try { await api.setQueueStatus(id, "funded"); await refresh(); flash("Marked as funded."); }
     catch (e) { console.error(e); flash("Update failed."); }
   };
@@ -1401,17 +1710,27 @@ function App() {
     try { history.replaceState(null, "", location.pathname); } catch {}
   }, [pendingLoanRef, db.loans]);
 
-  // A notification click on an already-open tab arrives as a SW message.
+  // Messages from the service worker: a notification click on an already-open
+  // tab, or a background-sync wake-up telling us to drain the outbox.
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     const onMsg = e => {
-      if (!e.data || e.data.type !== "notification-click") return;
+      if (!e.data) return;
+      if (e.data.type === "flush-outbox") { flushOutbox(); return; }
+      if (e.data.type !== "notification-click") return;
       let ref = null;
       try { ref = new URL(e.data.url).searchParams.get("loan"); } catch {}
       if (ref) setPendingLoanRef(ref); else setTab("home");
     };
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+  }, [flushOutbox]);
+
+  // Manifest shortcuts land on "?tab=status|new|cashflow" — honour it once.
+  useEffect(() => {
+    let want = null;
+    try { want = new URLSearchParams(location.search).get("tab"); } catch {}
+    if (want && ["home", "records", "status", "cashflow", "new", "queue"].includes(want)) setTab(want);
   }, []);
 
   const exportCsv = () => {
@@ -1433,14 +1752,24 @@ function App() {
     const amt = Number(txAmount);
     if (!(amt > 0)) { flash("Enter an amount greater than 0."); return; }
     if (!txDate) { flash("Pick a date."); return; }
+    const row = { id: uuid(), date: txDate, kind: txCat, direction: txDir(txCat), amount: amt, note: txNote.trim() };
     try {
-      await api.addTx({ date: txDate, kind: txCat, direction: txDir(txCat), amount: amt, note: txNote.trim() });
+      await api.addTx(row);
       await refresh();
       setTxAmount(""); setTxNote("");
       flash("Entry added.");
-    } catch (e) { console.error(e); flash("Save failed — check connection."); }
+    } catch (e) {
+      if (!isNetworkError(e)) { console.error(e); flash("Save failed — the server rejected it."); return; }
+      await enqueue("tx", row, prev => ({ ...prev, transactions: [...prev.transactions, { ...row, pending: true }] }));
+      setTxAmount(""); setTxNote("");
+      flash("Saved offline — syncs when you're back online.");
+    }
   };
-  const deleteTransaction = async id => { try { await api.delTx(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
+  const deleteTransaction = async t => {
+    if (t && t.pending) { await discardQueued("transactions", t.id); flash("Queued entry discarded."); return; }
+    const id = t && t.id ? t.id : t;
+    try { await api.delTx(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); }
+  };
   const commitOpening = async () => { try { await api.setOpening(Number(openingInput) || 0); await refresh(); } catch (e) { console.error(e); flash("Could not save opening balance."); } };
 
   const agreementLoan = useMemo(() => db.loans.find(l => l.id === agreementLoanId), [db.loans, agreementLoanId]);
@@ -1484,8 +1813,9 @@ function App() {
     if (!(amt > 0)) { flash("Enter a payment amount."); return; }
     if (!payDate) { flash("Pick a payment date."); return; }
     //if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
+    const row = { id: uuid(), loanId: resolved.loan.id, date: payDate, amount: amt, type: payType };
     try {
-      await api.addPayment({ loanId: resolved.loan.id, date: payDate, amount: amt, type: payType });
+      await api.addPayment(row);
       buzz();
       await refresh();
       setPayAmount("");
@@ -1501,9 +1831,20 @@ function App() {
         target: "all_staff",
         excludeEndpoint: pushEndpoint,
       });
-    } catch (e) { console.error(e); flash("Save failed — check connection."); }
+    } catch (e) {
+      if (!isNetworkError(e)) { console.error(e); flash("Save failed — the server rejected it."); return; }
+      // No signal: bank it locally. The balance, schedule and dues update now;
+      // the row syncs itself the moment the phone reconnects.
+      await enqueue("payment", row, prev => ({ ...prev, payments: [...prev.payments, { ...row, pending: true }] }));
+      buzz();
+      setPayAmount("");
+      flash(`Saved offline — ${fmt(amt)} syncs when you're back online.`);
+    }
   };
-  const deletePayment = async id => { try { await api.delPayment(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
+  const deletePayment = async p => {
+    if (p.pending) { await discardQueued("payments", p.id); flash("Queued payment discarded."); return; }
+    try { await api.delPayment(p.id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); }
+  };
 
   // Draft revision built from the modal inputs — null until it says something.
   const draftRevision = useMemo(() => {
@@ -1574,7 +1915,11 @@ function App() {
     if (!pull.current.active) return;
     const trigger = pull.current.dist > 60;
     pull.current.active = false; setPullDist(0);
-    if (trigger && !refreshing) { setRefreshing(true); buzz(8); try { await refresh(); } catch (e) { console.error(e); } setRefreshing(false); }
+    if (trigger && !refreshing) {
+      setRefreshing(true); buzz(8);
+      try { await flushOutbox(); await refresh(); } catch (e) { console.error(e); }
+      setRefreshing(false);
+    }
   };
   // Keep Lucide icons rendered across tab switches / re-renders
   useEffect(() => { if (window.lucide) lucide.createIcons(); });
@@ -1606,6 +1951,24 @@ function App() {
           {session && !session.user.is_anonymous && <button onClick={signOut} title={session.user.email} className="px-3 py-1.5 rounded-lg border border-slate-100 text-slate-500 text-xs font-semibold active:bg-slate-100 transition">Sign out</button>}
         </div>
       </header>
+
+      {/* Connection / sync strip — only present when there's something to say. */}
+      {(!online || queued.length > 0 || syncing) && (
+        <div className={`px-4 py-2 flex items-center gap-2 text-xs font-medium border-b ${
+          !online ? "bg-amber-50 border-amber-100 text-amber-800" : "bg-sky-50 border-sky-100 text-sky-800"}`}>
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${!online ? "bg-amber-500" : "bg-sky-500 animate-pulse"}`} />
+          <span className="flex-1 min-w-0 truncate">
+            {syncing ? "Syncing queued entries…"
+              : !online ? (queued.length
+                  ? `Offline · ${queued.length} entr${queued.length === 1 ? "y" : "ies"} saved on this device`
+                  : "Offline — your work is saved on this device")
+              : `${queued.length} entr${queued.length === 1 ? "y" : "ies"} waiting to sync`}
+          </span>
+          {online && !syncing && queued.length > 0 && (
+            <button onClick={() => flushOutbox()} className="px-2.5 py-1 rounded-lg bg-sky-600 text-white text-[11px] font-semibold active:bg-sky-700 transition shrink-0">Sync now</button>
+          )}
+        </div>
+      )}
 
       {/* Body */}
       <main ref={mainRef} onTouchStart={onPullStart} onTouchMove={onPullMove} onTouchEnd={onPullEnd} className="flex-1 overflow-y-auto scroll-ios px-4 py-4 pb-24 space-y-4">
@@ -1674,6 +2037,31 @@ function App() {
                 <i data-lucide="chevron-right" className="w-5 h-5 text-slate-300"></i>
               </button>
             )
+          )}
+
+          {/* Install to home screen. Chromium hands us a deferred prompt; iOS has
+              no such API, so those users get the Share-sheet instructions. */}
+          {showInstallCard && (
+            <div className={`${cardCls} p-4 space-y-3`}>
+              <div className="flex items-start gap-3">
+                <img src="icons/icon-96.png" alt="" className="w-11 h-11 rounded-xl shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="font-semibold text-slate-800 text-sm">Install Ohana on this device</p>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {installPrompt
+                      ? "Full screen, opens instantly, and keeps working without a signal."
+                      : "Tap Share, then “Add to Home Screen” — that also unlocks alerts on iPhone."}
+                  </p>
+                </div>
+                <button onClick={snoozeInstall} aria-label="Dismiss" className="text-slate-300 text-sm px-1 shrink-0">✕</button>
+              </div>
+              {installPrompt && (
+                <div className="flex gap-2">
+                  <button onClick={snoozeInstall} className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-500 text-sm font-semibold active:bg-slate-100 transition">Not now</button>
+                  <button onClick={runInstall} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Install app</button>
+                </div>
+              )}
+            </div>
           )}
 
           {/* Upcoming & overdue dues — one row per active borrower (their next unpaid installment) */}
@@ -2030,10 +2418,13 @@ function App() {
               {loanPayments.length > 0 && (
                 <div className="space-y-1.5 pt-1">
                   {loanPayments.map(p => (
-                    <div key={p.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+                    <div key={p.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-xs ${p.pending ? "bg-amber-50 border border-amber-100" : "bg-slate-50"}`}>
                       <span className="font-semibold">{fmt(p.amount)}</span>
-                      <span className="text-slate-500">{p.type} · {fmtDate(parseDate(p.date))}</span>
-                      <button onClick={() => deletePayment(p.id)} className="text-red-400 pl-2 text-base leading-none">×</button>
+                      <span className="text-slate-500 flex items-center gap-1.5">
+                        {p.pending && <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold">Queued</span>}
+                        {p.type} · {fmtDate(parseDate(p.date))}
+                      </span>
+                      <button onClick={() => deletePayment(p)} className="text-red-400 pl-2 text-base leading-none">×</button>
                     </div>
                   ))}
                 </div>
@@ -2127,8 +2518,9 @@ function App() {
                   <span className="text-slate-500"> · {t.kind}{t.note ? ` · ${t.note}` : ""}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {t.pending && <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold">Queued</span>}
                   <span className="text-slate-400">{fmtDate(parseDate(t.date))}</span>
-                  <button onClick={() => deleteTransaction(t.id)} className="text-red-400 text-base leading-none">×</button>
+                  <button onClick={() => deleteTransaction(t)} className="text-red-400 text-base leading-none">×</button>
                 </div>
               </div>
             ))}
@@ -2232,7 +2624,9 @@ function App() {
                 </div>
                 <div className="text-right shrink-0">
                   <p className="font-semibold text-slate-800 tabular-nums">{fmt(q.amount)}</p>
-                  <span className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${q.ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{q.ready ? "Ready to fund" : "Waiting"}</span>
+                  {q.pending
+                    ? <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold">Queued offline</span>
+                    : <span className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${q.ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{q.ready ? "Ready to fund" : "Waiting"}</span>}
                 </div>
               </div>
               <div>
@@ -2244,8 +2638,8 @@ function App() {
               </div>
               <div className="flex gap-2">
                 <button onClick={() => fundFromQueue(q)} className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition ${q.ready ? "bg-emerald-600 active:bg-emerald-800 text-white" : "border border-emerald-300 active:bg-emerald-50 text-emerald-700"}`}>Fund →</button>
-                <button onClick={() => markQueueFunded(q.id)} className="px-3.5 py-2.5 rounded-xl border border-slate-200 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Mark funded</button>
-                <button onClick={() => deleteQueueEntry(q.id)} className="px-3.5 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Remove</button>
+                <button onClick={() => markQueueFunded(q)} className="px-3.5 py-2.5 rounded-xl border border-slate-200 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Mark funded</button>
+                <button onClick={() => deleteQueueEntry(q)} className="px-3.5 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Remove</button>
               </div>
             </div>
           ))}
@@ -2262,7 +2656,7 @@ function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button onClick={() => requeue(q.id)} className="text-emerald-600 font-semibold">Re-queue</button>
-                    <button onClick={() => deleteQueueEntry(q.id)} className="text-red-400 text-base leading-none">×</button>
+                    <button onClick={() => deleteQueueEntry(q)} className="text-red-400 text-base leading-none">×</button>
                   </div>
                 </div>
               ))}
@@ -2451,6 +2845,25 @@ function App() {
                 </div>
               </>)}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* A new build is downloaded and waiting — the swap happens on tap only,
+          so nobody loses a half-entered payment to an auto-refresh. */}
+      {updateReady && (
+        <div className="no-print fixed left-4 right-4 z-40 sm:left-auto sm:right-4 sm:w-80 animate-fade-up"
+          style={{ bottom: "calc(env(safe-area-inset-bottom) + 8.5rem)" }}>{/* clears the toast at bottom-24 */}
+          <div className="bg-slate-900 text-white rounded-2xl shadow-xl px-4 py-3 flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center shrink-0">
+              <i data-lucide="arrow-down-to-line" className="w-4 h-4"></i>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold leading-tight">Update ready</p>
+              <p className="text-[11px] text-white/60 leading-tight">A newer version of Ohana is downloaded.</p>
+            </div>
+            <button onClick={() => setUpdateReady(false)} className="text-white/50 text-xs px-1 shrink-0">Later</button>
+            <button onClick={applyUpdate} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-xs font-semibold active:bg-emerald-600 transition shrink-0">Update</button>
           </div>
         </div>
       )}

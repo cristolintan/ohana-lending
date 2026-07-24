@@ -3,14 +3,46 @@
   "short_name": "OHANA",
   "description": "Loan manager for records, payments, and agreements. Offline-first Progressive Web App.",
   "id": "./",
-  "start_url": "./",
+  "start_url": "./?source=pwa",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait-primary",
   "background_color": "#111114",
   "theme_color": "#111114",
+  "lang": "en-PH",
+  "dir": "ltr",
+  "categories": ["finance", "business", "productivity"],
+  "prefer_related_applications": false,
+  "launch_handler": { "client_mode": "navigate-existing" },
   "icons": [
+    { "src": "icons/icon-96.png", "sizes": "96x96", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Log a Payment",
+      "short_name": "Payment",
+      "description": "Open the Payments tab to record a collection",
+      "url": "./?tab=status&source=shortcut",
+      "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96", "type": "image/png" }]
+    },
+    {
+      "name": "New Loan",
+      "short_name": "New Loan",
+      "description": "Create a loan and preview its schedule",
+      "url": "./?tab=new&source=shortcut",
+      "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96", "type": "image/png" }]
+    },
+    {
+      "name": "Cash Flow",
+      "short_name": "Cash Flow",
+      "description": "Review inflow, outflow, and cash position",
+      "url": "./?tab=cashflow&source=shortcut",
+      "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96", "type": "image/png" }]
+    }
   ]
 }
