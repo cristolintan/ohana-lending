@@ -13,6 +13,12 @@
       "skillPath": "SKILL.md",
       "computedHash": "b55732a1e5fbd0d00eb205d52af2bc72cfb9dbd13f8a7fd38d25acdc96f7ac5e"
     },
+    "pwa-expert": {
+      "source": "curiositech/some_claude_skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/pwa-expert/SKILL.md",
+      "computedHash": "cbd7e8e72e82504420ece0cb1dd8994cd5909f60d21c9082afccbddf7c528b8b"
+    },
     "supabase": {
       "source": "supabase/agent-skills",
       "sourceType": "github",
