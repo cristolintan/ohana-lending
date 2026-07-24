@@ -275,6 +275,23 @@ const api = {
 };
 
 // ─── Finance logic ───────────────────────────────────────────────────────────
+// One installment measured in semi-monthly periods — the unit the flat rate is
+// quoted in. Monthly spans two periods so it charges 2× the rate per payment;
+// Weekly counts as half a period, so 2 weekly payments cost the same interest
+// as 1 semi-monthly and 4 weekly the same as 1 monthly. Collecting more often
+// doesn't change what the borrower pays in total.
+const FREQUENCIES = ["Weekly", "Semi-Monthly", "Monthly"];
+const FREQ_MULT = { Weekly: 0.5, "Semi-Monthly": 1, Monthly: 2 };
+const freqMult = f => (FREQ_MULT[f] != null ? FREQ_MULT[f] : 1);
+
+// Due date of installment #i (0-based) counted from `from`. Weekly lands every
+// 7 days; semi-monthly alternates month-anniversary and +15 days.
+function dueDate(frequency, from, i) {
+  if (frequency === "Weekly") return addDays(from, i * 7);
+  if (frequency === "Monthly") return edate(from, i);
+  return i % 2 === 0 ? edate(from, i / 2) : addDays(edate(from, (i - 1) / 2), 15);
+}
+
 // Projected schedule for a brand-new (unpaid) loan, shown in the New Loan
 // preview and the printed Loan Agreement. Delegates to the SAME engine the
 // Payments tab uses (computeStatusBase with no payments) so the projection and
@@ -292,8 +309,7 @@ function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }
 function computeStatusBase(loan, allPayments) {
   const pAmt = Number(loan.amount), terms = Math.floor(Number(loan.terms));
   const rate = Number(loan.flatRate) / 100;
-  const multiplier = loan.frequency === "Monthly" ? 2 : 1;
-  const totalInterest = pAmt * rate * terms * multiplier;
+  const totalInterest = pAmt * rate * terms * freqMult(loan.frequency);
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const intDrop = (pAmt * drop) / terms;
   const pays = allPayments.filter(p => p.loanId === loan.id).sort((a, b) => a.date < b.date ? -1 : 1);
@@ -311,15 +327,18 @@ function computeStatusBase(loan, allPayments) {
     const isExt = prevExt < extCount && payType === "Minimum Due";
     const schedMonth = step - prevExt;
     const prevRem = step === 1 ? pAmt : rows[step-2].remaining - rows[step-2].principal;
-    const pPaid = isExt ? 0 : schedMonth <= remCents ? baseP + 0.01 : baseP;
+    // Spread the rounding remainder one centavo at a time. remCents goes
+    // NEGATIVE when pAmt/terms rounds up (e.g. 10,000 / 24 → 416.67), and those
+    // centavos have to be shaved rather than added — otherwise the principal
+    // column sums to more than the loan amount. Weekly terms hit this often.
+    const pPaid = isExt ? 0
+      : remCents >= 0 ? (schedMonth <= remCents ? baseP + 0.01 : baseP)
+      : (schedMonth <= -remCents ? round2(baseP - 0.01) : baseP);
     const ratio = (pAmt - prevRem) / pAmt;
     const tier = Math.min(terms, 1 + Math.round(ratio * terms));
     const intPaid = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
     const totPay = pPaid + intPaid;
-    const stepIdx = step - 1;
-    let due;
-    if (loan.frequency === "Monthly") due = edate(sd, stepIdx);
-    else due = stepIdx % 2 === 0 ? edate(sd, stepIdx / 2) : addDays(edate(sd, (stepIdx - 1) / 2), 15);
+    const due = dueDate(loan.frequency, sd, step - 1);
     cumDue += totPay;
     const status = totalLogged >= cumDue ? "PAID" : totalLogged > cumDue - totPay ? "PARTIAL" : "UNPAID";
     const amtLeft = Math.max(0, totPay - Math.max(0, totalLogged - (cumDue - totPay)));
@@ -345,24 +364,26 @@ function computeStatus(loan, allPayments) {
   if (!after.length) return base;                 // switch falls after the loan ends → no change
   const pAmt = Number(loan.amount), totalLogged = base.totalLogged, rate = Number(loan.flatRate) / 100;
   const remP = after.reduce((s, r) => s + r.principal, 0);
-  const mult = f => f === "Monthly" ? 2 : 1;
   const explicitTerms = fc.terms && Number(fc.terms) > 0;
   // New remaining installment count: explicit if given, else derived from the
-  // frequency change keeping the original payoff date.
+  // frequency change keeping the original payoff date. (Semi-Monthly → Weekly
+  // doubles the count, Monthly → Weekly quadruples it.)
   const n = explicitTerms
     ? Math.min(240, Math.floor(Number(fc.terms)))
-    : Math.max(1, Math.round(after.length * mult(loan.frequency) / mult(F1)));
+    : Math.max(1, Math.round(after.length * freqMult(loan.frequency) / freqMult(F1)));
   // Changing the term re-prices interest on the remaining balance (more terms = more
   // interest). A frequency-only change keeps the original remaining interest.
-  const remI = explicitTerms ? remP * rate * n * mult(F1) : after.reduce((s, r) => s + r.interest, 0);
+  const remI = explicitTerms ? remP * rate * n * freqMult(F1) : after.reduce((s, r) => s + r.interest, 0);
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const avgI = remI / n, dropR = (remP * drop) / n;   // diminishing model, scaled to the remainder
   const rem = [];
   for (let i = 0; i < n; i++) {
-    let due;
-    if (F1 === "Monthly") due = edate(D, i);
-    else due = i % 2 === 0 ? edate(D, i / 2) : addDays(edate(D, (i - 1) / 2), 15);
-    rem.push({ principal: remP / n, interest: avgI + ((n + 1) / 2 - (i + 1)) * dropR, due, isSwitched: true });
+    rem.push({
+      principal: remP / n,
+      interest: avgI + ((n + 1) / 2 - (i + 1)) * dropR,
+      due: dueDate(F1, D, i),
+      isSwitched: true,
+    });
   }
   const combined = [
     ...kept.map(r => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt })),
@@ -2133,7 +2154,7 @@ function App() {
               <div>
               <label className={labelCls}>Frequency</label>
               <select className={inputCls} value={frequency} onChange={e => setFrequency(e.target.value)}>
-                <option>Semi-Monthly</option><option>Monthly</option>
+                {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
               </select>
             </div>
             <div className="col-span-2">
@@ -2808,7 +2829,7 @@ function App() {
                     <label className={labelCls}>New frequency</label>
                     <select className={inputCls} value={revFreq} onChange={e => setRevFreq(e.target.value)}>
                       <option value="">Keep ({resolved.loan.frequency})</option>
-                      <option>Monthly</option><option>Semi-Monthly</option>
+                      {FREQUENCIES.filter(f => f !== resolved.loan.frequency).map(f => <option key={f}>{f}</option>)}
                     </select>
                   </div>
                   <div className="col-span-2">
