@@ -12,8 +12,16 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Ohana" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="96x96" href="icons/icon-96.png" />
   <link rel="manifest" href="manifest.json" />
   <meta name="theme-color" content="#111114" />
+  <meta name="color-scheme" content="dark light" />
+
+  <!-- Warm up the library CDNs before the parser reaches their <script> tags -->
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+  <link rel="preconnect" href="https://hjlibhrxyfipsajcywzj.supabase.co" crossorigin />
 
   <!-- Tailwind (vendored locally — no CDN / no cross-origin request) -->
   <script src="./tailwindcss.js"></script>
@@ -136,6 +144,11 @@
          (printing is handled separately and is unaffected). */
       #agreement-print { background: #ffffff !important; color: #1e293b !important; }
       #agreement-print .bg-white { background: #ffffff !important; }
+      /* Schedule table header + TOTAL row: keep the light fills the printed
+         contract uses (real slate-50/100), otherwise the dark-surface remap
+         above paints them near-black behind near-black text. */
+      #agreement-print .bg-slate-50  { background-color: #f8fafc !important; }
+      #agreement-print .bg-slate-100 { background-color: #f1f5f9 !important; }
       #agreement-print .text-slate-800,
       #agreement-print .text-slate-700,
       #agreement-print .text-slate-600,
@@ -160,10 +173,13 @@
     @keyframes fadeUp  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
     @keyframes slideUp { from { opacity: 0; transform: translate(-50%, 16px); } to { opacity: 1; transform: translate(-50%, 0); } }
+    /* Bottom-sheet entrance (modals that dock to the bottom edge on phones) */
+    @keyframes sheetUp  { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: translateY(0); } }
     .animate-fade-in  { animation: fadeIn  0.25s ease-out both; }
     .animate-fade-up  { animation: fadeUp  0.30s ease-out both; }
     .animate-scale-in { animation: scaleIn 0.20s ease-out both; }
     .animate-slide-up { animation: slideUp 0.30s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .animate-sheet-up { animation: sheetUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
     /* Respect users who prefer reduced motion */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -191,10 +207,52 @@
   <div id="root"></div>
   <script type="text/babel" data-presets="react-classic" src="app.js"></script>
   <script>
-    // Register service worker
+    // ── Service worker registration + update detection ──
+    // The worker never calls skipWaiting() on its own, so a waiting worker means
+    // "a new version is downloaded and ready". We surface that to the app via a
+    // window event; app.js renders the update banner and posts SKIP_WAITING.
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('sw.js').catch(console.error);
+      var announceUpdate = function (reg) {
+        window.__swWaiting = reg.waiting;
+        window.dispatchEvent(new CustomEvent('sw-update-ready'));
+      };
+
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').then(function (reg) {
+          window.__swRegistration = reg;
+
+          // Already waiting when the page loaded (update downloaded last visit).
+          if (reg.waiting && navigator.serviceWorker.controller) announceUpdate(reg);
+
+          reg.addEventListener('updatefound', function () {
+            var sw = reg.installing;
+            if (!sw) return;
+            sw.addEventListener('statechange', function () {
+              // controller check: on a first-ever install there is nothing to
+              // replace, so don't nag the user about "updating".
+              if (sw.state === 'installed' && navigator.serviceWorker.controller) announceUpdate(reg);
+            });
+          });
+
+          // Look for a new release when the app is brought back to the foreground,
+          // and hourly for devices that stay open all day.
+          var check = function () { reg.update().catch(function () {}); };
+          document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') check();
+          });
+          setInterval(check, 60 * 60 * 1000);
+        }).catch(console.error);
+
+        // The new worker took over → load its assets exactly once. A first-ever
+        // install also fires this (clients.claim) with no previous controller;
+        // that page is already running the newest code, so don't reload it.
+        var hadController = !!navigator.serviceWorker.controller;
+        var reloading = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (!hadController || reloading) return;
+          reloading = true;
+          window.location.reload();
+        });
       });
     }
   </script>
