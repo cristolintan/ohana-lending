@@ -160,10 +160,13 @@
     @keyframes fadeUp  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
     @keyframes slideUp { from { opacity: 0; transform: translate(-50%, 16px); } to { opacity: 1; transform: translate(-50%, 0); } }
+    /* Bottom-sheet entrance (modals that dock to the bottom edge on phones) */
+    @keyframes sheetUp  { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: translateY(0); } }
     .animate-fade-in  { animation: fadeIn  0.25s ease-out both; }
     .animate-fade-up  { animation: fadeUp  0.30s ease-out both; }
     .animate-scale-in { animation: scaleIn 0.20s ease-out both; }
     .animate-slide-up { animation: slideUp 0.30s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .animate-sheet-up { animation: sheetUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
     /* Respect users who prefer reduced motion */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {

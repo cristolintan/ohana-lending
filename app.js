@@ -948,6 +948,7 @@ function App() {
   const [freqDate, setFreqDate] = useState(today());
   const [revFreq, setRevFreq] = useState("");
   const [revTerms, setRevTerms] = useState("");
+  const [reviseOpen, setReviseOpen] = useState(false); // schedule revision lives in a modal
 
   const flash = msg => { setToast(msg); setTimeout(() => setToast(""), 2500); };
   const refresh = useCallback(async () => { const data = await api.fetchAll(); setDb(data); return data; }, []);
@@ -1504,22 +1505,53 @@ function App() {
   };
   const deletePayment = async id => { try { await api.delPayment(id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); } };
 
-  const applyRevision = async loan => {
-    if (!freqDate) { flash("Pick an effective date."); return; }
+  // Draft revision built from the modal inputs — null until it says something.
+  const draftRevision = useMemo(() => {
+    if (!freqDate) return null;
     const fc = { date: freqDate };
     if (revFreq) fc.frequency = revFreq;
     if (revTerms && Number(revTerms) > 0) fc.terms = Math.floor(Number(revTerms));
-    if (!fc.frequency && !fc.terms) { flash("Choose a new frequency and/or number of installments."); return; }
+    return fc.frequency || fc.terms ? fc : null;
+  }, [freqDate, revFreq, revTerms]);
+
+  // Live "what changes" preview for the modal — runs the same engine the saved
+  // revision would, so the numbers shown are the numbers you get.
+  const revisionPreview = useMemo(() => {
+    if (!draftRevision || !resolved.loan || !statusData || resolved.loan.freqChange) return null;
+    const next = computeStatus({ ...resolved.loan, freqChange: draftRevision }, db.payments);
+    const last = next.rows[next.rows.length - 1];
+    return {
+      installments: next.rows.length,
+      payoff: last ? last.due : null,
+      interest: next.summedInterest,
+      delta: next.summedInterest - statusData.summedInterest,
+      left: next.grandLeft,
+    };
+  }, [draftRevision, resolved.loan, statusData, db.payments]);
+
+  const applyRevision = async loan => {
+    if (!freqDate) { flash("Pick an effective date."); return; }
+    const fc = draftRevision;
+    if (!fc) { flash("Choose a new frequency and/or number of installments."); return; }
     const desc = [fc.frequency, fc.terms ? `${fc.terms} installments` : null].filter(Boolean).join(", ");
     const note = fc.terms ? "total interest re-prices for the new term" : "same total owed";
     if (!confirm(`Revise ${loan.ref || loan.id} from ${fmtDate(parseDate(freqDate))} → ${desc}? Paid installments stay; the remaining balance re-amortizes (${note}).`)) return;
-    try { await api.setFreqChange(loan.id, fc); await refresh(); setRevFreq(""); setRevTerms(""); flash("Schedule revised."); }
+    try { await api.setFreqChange(loan.id, fc); await refresh(); setRevFreq(""); setRevTerms(""); setReviseOpen(false); flash("Schedule revised."); }
     catch (e) { console.error(e); flash("Could not revise schedule."); }
   };
   const clearRevision = async loan => {
-    try { await api.setFreqChange(loan.id, null); await refresh(); flash("Revision removed."); }
+    try { await api.setFreqChange(loan.id, null); await refresh(); setReviseOpen(false); flash("Revision removed."); }
     catch (e) { console.error(e); flash("Could not update."); }
   };
+
+  // Close the revision sheet on Escape / when the selected loan changes.
+  useEffect(() => {
+    if (!reviseOpen) return;
+    const onKey = e => { if (e.key === "Escape") setReviseOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [reviseOpen]);
+  useEffect(() => { setReviseOpen(false); }, [resolved.loan && resolved.loan.id]);
 
   const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
 
@@ -1920,38 +1952,21 @@ function App() {
                   <ProgressBar pct={pct} tone="emerald" />
                 </div>
               ); })()}
-            </div>
 
-            {/* Revise remaining schedule (frequency and/or terms) */}
-            <div className="bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
-              <p className="font-semibold text-slate-800">Revise Remaining Schedule</p>
-              <p className="text-xs text-slate-500">
-                Current: {resolved.loan.frequency} · {resolved.loan.terms} terms
-                {resolved.loan.freqChange && <> → <span className="font-semibold text-emerald-700">{resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? `, ${resolved.loan.freqChange.terms} installments` : ""}</span> from {fmtDate(parseDate(resolved.loan.freqChange.date))}</>}
-              </p>
-              {resolved.loan.freqChange ? (
-                <button onClick={() => clearRevision(resolved.loan)} className="px-3 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Undo revision</button>
-              ) : (<>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className={labelCls}>Effective date</label>
-                    <input type="date" className={inputCls} value={freqDate} onChange={e => setFreqDate(e.target.value)} />
-                  </div>
-                  <div>
-                    <label className={labelCls}>New frequency</label>
-                    <select className={inputCls} value={revFreq} onChange={e => setRevFreq(e.target.value)}>
-                      <option value="">Keep ({resolved.loan.frequency})</option>
-                      <option>Monthly</option><option>Semi-Monthly</option>
-                    </select>
-                  </div>
-                  <div className="col-span-2">
-                    <label className={labelCls}>Remaining installments</label>
-                    <input type="number" inputMode="numeric" className={inputCls} value={revTerms} onChange={e => setRevTerms(e.target.value)} placeholder="leave blank = keep same payoff date" />
-                  </div>
-                  <p className="col-span-2 text-[11px] text-slate-400 -mt-1">Changing the number of installments re-prices the total interest; a frequency-only change keeps the same total.</p>
-                </div>
-                <button onClick={() => applyRevision(resolved.loan)} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Apply revision</button>
-              </>)}
+              {/* Schedule terms + entry point to the revision sheet — one slim row
+                  instead of a full card, since revising is a rare action. */}
+              <button onClick={() => setReviseOpen(true)}
+                className="w-full flex items-center gap-2 pt-3 border-t border-slate-50 text-left active:opacity-60 transition">
+                <i data-lucide="calendar-clock" className="w-4 h-4 text-slate-400 shrink-0"></i>
+                <span className="flex-1 min-w-0 text-xs text-slate-500 truncate">
+                  {resolved.loan.freqChange
+                    ? <span className="font-medium text-emerald-700">{resolved.loan.freqChange.frequency || resolved.loan.frequency}{resolved.loan.freqChange.terms ? ` · ${resolved.loan.freqChange.terms} installments` : ""}</span>
+                    : <>{resolved.loan.frequency} · {resolved.loan.terms} terms</>}
+                </span>
+                {resolved.loan.freqChange && <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[10px] font-semibold shrink-0">Revised</span>}
+                <span className="text-xs font-semibold text-emerald-600 shrink-0">Revise</span>
+                <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300 shrink-0"></i>
+              </button>
             </div>
 
             {/* Schedule */}
@@ -2345,6 +2360,96 @@ function App() {
                   <button onClick={() => revokeEmail(u.email)} className="text-red-500 font-semibold pl-2 shrink-0">Remove</button>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Revise Remaining Schedule ── bottom sheet on phones, centered dialog on
+          wider screens. Kept out of the Payments flow so the tab stays compact. */}
+      {reviseOpen && resolved.loan && statusData && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={() => setReviseOpen(false)}>
+          <div onClick={e => e.stopPropagation()}
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[88vh] overflow-y-auto scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800">Revise Remaining Schedule</p>
+                  <p className="text-xs text-slate-400 truncate">{resolved.loan.ref || resolved.loan.id} · {resolved.loan.borrower}</p>
+                </div>
+                <button onClick={() => setReviseOpen(false)} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+
+            <div className="px-5 py-4 space-y-3">
+              <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs">
+                <span className="text-slate-400">Current schedule</span>
+                <span className="font-semibold text-slate-700">{resolved.loan.frequency} · {resolved.loan.terms} terms</span>
+              </div>
+
+              {resolved.loan.freqChange ? (<>
+                <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3.5 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">Active revision</p>
+                  <p className="mt-0.5 text-sm font-bold text-emerald-800">
+                    {resolved.loan.freqChange.frequency || resolved.loan.frequency}
+                    {resolved.loan.freqChange.terms ? ` · ${resolved.loan.freqChange.terms} installments` : ""}
+                  </p>
+                  <p className="text-xs text-emerald-700">Effective {fmtDate(parseDate(resolved.loan.freqChange.date))}</p>
+                </div>
+                <p className="text-[11px] text-slate-400">Undoing restores the original schedule. Logged payments are never affected.</p>
+                <button onClick={() => clearRevision(resolved.loan)}
+                  className="w-full py-3 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Undo revision</button>
+              </>) : (<>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Effective date</label>
+                    <input type="date" className={inputCls} value={freqDate} onChange={e => setFreqDate(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>New frequency</label>
+                    <select className={inputCls} value={revFreq} onChange={e => setRevFreq(e.target.value)}>
+                      <option value="">Keep ({resolved.loan.frequency})</option>
+                      <option>Monthly</option><option>Semi-Monthly</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className={labelCls}>Remaining installments</label>
+                    <input type="number" inputMode="numeric" className={inputCls} value={revTerms} onChange={e => setRevTerms(e.target.value)} placeholder="Leave blank — keep the same payoff date" />
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-400">Paid installments stay as they are. Changing the number of installments re-prices the total interest; a frequency-only change keeps the same total.</p>
+
+                {revisionPreview ? (
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3.5 py-3 space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">After revision</p>
+                    <div className="grid grid-cols-2 gap-y-2 gap-x-3 text-xs">
+                      <div><p className="text-slate-400">Installments</p><p className="font-bold text-slate-800 tabular-nums">{revisionPreview.installments}</p></div>
+                      <div><p className="text-slate-400">Payoff date</p><p className="font-bold text-slate-800 tabular-nums">{revisionPreview.payoff ? fmtDate(revisionPreview.payoff) : "—"}</p></div>
+                      <div><p className="text-slate-400">Total interest</p><p className="font-bold text-amber-600 tabular-nums">{fmt(revisionPreview.interest)}</p></div>
+                      <div><p className="text-slate-400">Balance left</p><p className="font-bold text-emerald-700 tabular-nums">{fmt(revisionPreview.left)}</p></div>
+                    </div>
+                    {Math.abs(revisionPreview.delta) > 0.005 && (
+                      <p className={`text-[11px] font-semibold ${revisionPreview.delta > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                        {revisionPreview.delta > 0 ? "▲" : "▼"} {fmt(Math.abs(revisionPreview.delta))} interest vs. the current schedule
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400 text-center py-2">Pick a new frequency and/or installment count to preview the change.</p>
+                )}
+
+                <div className="flex gap-2 pt-1">
+                  <button onClick={() => setReviseOpen(false)}
+                    className="px-4 py-3 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Cancel</button>
+                  <button onClick={() => applyRevision(resolved.loan)} disabled={!revisionPreview}
+                    className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold disabled:opacity-40 transition">Apply revision</button>
+                </div>
+              </>)}
             </div>
           </div>
         </div>
