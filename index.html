@@ -144,6 +144,11 @@
          (printing is handled separately and is unaffected). */
       #agreement-print { background: #ffffff !important; color: #1e293b !important; }
       #agreement-print .bg-white { background: #ffffff !important; }
+      /* Schedule table header + TOTAL row: keep the light fills the printed
+         contract uses (real slate-50/100), otherwise the dark-surface remap
+         above paints them near-black behind near-black text. */
+      #agreement-print .bg-slate-50  { background-color: #f8fafc !important; }
+      #agreement-print .bg-slate-100 { background-color: #f1f5f9 !important; }
       #agreement-print .text-slate-800,
       #agreement-print .text-slate-700,
       #agreement-print .text-slate-600,
