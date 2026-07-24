@@ -168,6 +168,50 @@
     @media (max-width: 640px) {
       input, select, textarea { font-size: 16px !important; }
     }
+
+    /* ── Date fields on iOS ───────────────────────────────────────────────
+       Mobile Safari renders <input type="date"> as a shrink-wrapped inner box
+       instead of a normal field, which breaks it three ways (desktop Chrome is
+       unaffected, which is why it only looks wrong on the phone):
+         1. it ignores width:100% and keeps its own intrinsic width, so in the
+            two-column grids (Log Payment, Revise, Queue, Cash Entries) it
+            overflows its cell and knocks the row out of alignment;
+         2. only the value text is tappable — tapping the rest of the field does
+            nothing, so it feels dead/unreactive;
+         3. its intrinsic height doesn't match the sibling text/select inputs.
+       Making the control and its inner value box fill the field fixes all three
+       and gives the whole box a 44px tap target. */
+    input, select, textarea { min-width: 0; }   /* let controls shrink in grid/flex cells */
+    /* One height for every control, so a date never sits shorter than the select
+       beside it (measured: 42px vs 50px on WebKit). 44px is also Apple's minimum
+       comfortable tap target. */
+    input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+    select {
+      height: 2.75rem;
+    }
+    /* A fixed height plus the py-2.5 utility squeezes a select's text box and
+       WebKit clips the label — the control centres its own text, so drop the
+       vertical padding (the horizontal px-* utility still applies). */
+    select { padding-top: 0 !important; padding-bottom: 0 !important; }
+    input[type="date"] {
+      -webkit-appearance: none;
+      appearance: none;
+      display: block;
+      width: 100%;
+      line-height: 1.25rem;
+      text-align: left;
+      touch-action: manipulation;
+    }
+    input[type="date"]::-webkit-date-and-time-value {
+      width: 100%;
+      margin: 0;
+      text-align: left;
+      line-height: 1.25rem;     /* same line box as the text inputs */
+    }
+    input[type="date"]::-webkit-datetime-edit,
+    input[type="date"]::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+    /* Safari renders an empty date as nothing at all — keep the row height stable. */
+    input[type="date"]:invalid::-webkit-datetime-edit { color: #6a6a72; }
     /* ── Smooth animations ── */
     @keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
     @keyframes fadeUp  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
