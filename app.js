@@ -1326,8 +1326,39 @@ function App() {
   const exportSchedulePng = async () => {
     const el = document.getElementById("projected-export");
     if (!el || !window.html2canvas) { flash("Image tools not ready — reload once online."); return; }
+    // On a phone the table is wider than the screen, so only the first few
+    // columns are actually on screen. Capturing the card as-is crops the rest:
+    // the scroller clips to its visible width, and the card itself is
+    // overflow-hidden for its rounded corners. Measure the table's true width
+    // and un-clip both — inside html2canvas's cloned document, so the page the
+    // user is looking at never jumps.
+    const scroller = el.querySelector(".overflow-x-auto");
+    const fullWidth = Math.ceil(Math.max(
+      el.getBoundingClientRect().width,
+      scroller ? scroller.scrollWidth : 0,
+    ));
     try {
-      const canvas = await window.html2canvas(el, { scale: 2, backgroundColor: "#ffffff", ignoreElements: n => n.classList && n.classList.contains("no-capture") });
+      const canvas = await window.html2canvas(el, {
+        scale: 2,
+        backgroundColor: "#ffffff",
+        width: fullWidth,
+        // The clone is laid out in a viewport this wide, or the table would be
+        // squeezed back down to phone width before it is painted.
+        windowWidth: Math.max(document.documentElement.clientWidth, fullWidth),
+        ignoreElements: n => n.classList && n.classList.contains("no-capture"),
+        onclone: doc => {
+          const card = doc.getElementById("projected-export");
+          if (!card) return;
+          const widen = node => {
+            if (!node) return;
+            node.style.width = `${fullWidth}px`;
+            node.style.maxWidth = "none";
+            node.style.overflow = "visible";
+          };
+          widen(card);
+          widen(card.querySelector(".overflow-x-auto"));
+        },
+      });
       const a = document.createElement("a");
       a.href = canvas.toDataURL("image/png");
       a.download = `Schedule - ${name.trim() || "loan"}.png`;
