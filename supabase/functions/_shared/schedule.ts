@@ -56,11 +56,23 @@ export function isoOf(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// One installment measured in semi-monthly periods — the unit the flat rate is
+// quoted in. Monthly spans two periods (2× rate per payment); Weekly counts as
+// half a period, so 4 weekly payments cost the same interest as 1 monthly.
+const FREQ_MULT: Record<string, number> = { Weekly: 0.5, "Semi-Monthly": 1, Monthly: 2 };
+const freqMult = (f: string) => (FREQ_MULT[f] != null ? FREQ_MULT[f] : 1);
+
+// Due date of installment #i (0-based) counted from `from`.
+function dueDate(frequency: string, from: Date, i: number) {
+  if (frequency === "Weekly") return addDays(from, i * 7);
+  if (frequency === "Monthly") return edate(from, i);
+  return i % 2 === 0 ? edate(from, i / 2) : addDays(edate(from, (i - 1) / 2), 15);
+}
+
 function computeStatusBase(loan: Loan, allPayments: Pay[]): Status {
   const pAmt = Number(loan.amount), terms = Math.floor(Number(loan.terms));
   const rate = Number(loan.flatRate) / 100;
-  const multiplier = loan.frequency === "Monthly" ? 2 : 1;
-  const totalInterest = pAmt * rate * terms * multiplier;
+  const totalInterest = pAmt * rate * terms * freqMult(loan.frequency);
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const intDrop = (pAmt * drop) / terms;
   const pays = allPayments.filter((p) => p.loanId === loan.id).sort((a, b) => (a.date < b.date ? -1 : 1));
@@ -79,15 +91,16 @@ function computeStatusBase(loan: Loan, allPayments: Pay[]): Status {
     const isExt = prevExt < extCount && payType === "Minimum Due";
     const schedMonth = step - prevExt;
     const prevRem = step === 1 ? pAmt : rows[step - 2].remaining - rows[step - 2].principal;
-    const pPaid = isExt ? 0 : schedMonth <= remCents ? baseP + 0.01 : baseP;
+    // remCents goes negative when pAmt/terms rounds up — shave those centavos
+    // instead of adding them, or principal sums above the loan amount.
+    const pPaid = isExt ? 0
+      : remCents >= 0 ? (schedMonth <= remCents ? baseP + 0.01 : baseP)
+      : (schedMonth <= -remCents ? round2(baseP - 0.01) : baseP);
     const ratio = (pAmt - prevRem) / pAmt;
     const tier = Math.min(terms, 1 + Math.round(ratio * terms));
     const intPaid = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
     const totPay = pPaid + intPaid;
-    const stepIdx = step - 1;
-    let due: Date;
-    if (loan.frequency === "Monthly") due = edate(sd, stepIdx);
-    else due = stepIdx % 2 === 0 ? edate(sd, stepIdx / 2) : addDays(edate(sd, (stepIdx - 1) / 2), 15);
+    const due = dueDate(loan.frequency, sd, step - 1);
     cumDue += totPay;
     const status = totalLogged >= cumDue ? "PAID" : totalLogged > cumDue - totPay ? "PARTIAL" : "UNPAID";
     const amtLeft = Math.max(0, totPay - Math.max(0, totalLogged - (cumDue - totPay)));
@@ -109,20 +122,16 @@ export function computeStatus(loan: Loan, allPayments: Pay[]): Status {
   if (!after.length) return base;
   const pAmt = Number(loan.amount), totalLogged = base.totalLogged, rate = Number(loan.flatRate) / 100;
   const remP = after.reduce((s, r) => s + r.principal, 0);
-  const mult = (f: string) => (f === "Monthly" ? 2 : 1);
   const explicitTerms = fc.terms && Number(fc.terms) > 0;
   const n = explicitTerms
     ? Math.min(240, Math.floor(Number(fc.terms)))
-    : Math.max(1, Math.round(after.length * mult(loan.frequency) / mult(F1)));
-  const remI = explicitTerms ? remP * rate * n * mult(F1) : after.reduce((s, r) => s + r.interest, 0);
+    : Math.max(1, Math.round(after.length * freqMult(loan.frequency) / freqMult(F1)));
+  const remI = explicitTerms ? remP * rate * n * freqMult(F1) : after.reduce((s, r) => s + r.interest, 0);
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const avgI = remI / n, dropR = (remP * drop) / n;
   const rem: { principal: number; interest: number; due: Date; isExt?: boolean }[] = [];
   for (let i = 0; i < n; i++) {
-    let due: Date;
-    if (F1 === "Monthly") due = edate(D, i);
-    else due = i % 2 === 0 ? edate(D, i / 2) : addDays(edate(D, (i - 1) / 2), 15);
-    rem.push({ principal: remP / n, interest: avgI + ((n + 1) / 2 - (i + 1)) * dropR, due });
+    rem.push({ principal: remP / n, interest: avgI + ((n + 1) / 2 - (i + 1)) * dropR, due: dueDate(F1, D, i) });
   }
   const combined = [
     ...kept.map((r) => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt })),
