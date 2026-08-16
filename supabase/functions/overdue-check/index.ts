@@ -1,6 +1,6 @@
 // overdue-check — run once a day by pg_cron. Computes which loans have an
 // unpaid installment due today or already overdue (using the same schedule
-// engine as the app), then asks send-push to alert all staff.
+// engine as the app), then asks send-push to alert each loan's owner.
 //
 // Protected by a shared secret header (x-cron-secret) since verify_jwt is off.
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -45,8 +45,19 @@ Deno.serve(async (req) => {
   }));
   const todayStr = manilaToday();
 
-  const overdue: { ref: string; borrower: string; amt: number }[] = [];
-  const dueToday: { ref: string; borrower: string; amt: number }[] = [];
+  type Item = { ref: string; borrower: string; amt: number };
+
+  // Loans are private to the user who owns them, so alerts are accumulated per
+  // owner and delivered only to that owner's devices. Sending one combined
+  // summary to "all_staff" would put every borrower's name and outstanding
+  // amount on every other user's lock screen — RLS cannot prevent that here,
+  // because this function reads with the service role.
+  const byUser = new Map<string, { overdue: Item[]; dueToday: Item[] }>();
+  const bucket = (uid: string) => {
+    let b = byUser.get(uid);
+    if (!b) { b = { overdue: [], dueToday: [] }; byUser.set(uid, b); }
+    return b;
+  };
 
   for (const r of loansRes.data || []) {
     const loan: Loan = {
@@ -59,8 +70,8 @@ Deno.serve(async (req) => {
 
     const od = st.rows.filter((row) => row.amtLeft > 0.005 && isoOf(row.due) < todayStr);
     const dt = st.rows.filter((row) => row.amtLeft > 0.005 && isoOf(row.due) === todayStr);
-    if (od.length) overdue.push({ ref: loan.ref, borrower: loan.borrower, amt: od.reduce((s, x) => s + x.amtLeft, 0) });
-    if (dt.length) dueToday.push({ ref: loan.ref, borrower: loan.borrower, amt: dt.reduce((s, x) => s + x.amtLeft, 0) });
+    if (od.length) bucket(r.user_id).overdue.push({ ref: loan.ref, borrower: loan.borrower, amt: od.reduce((s, x) => s + x.amtLeft, 0) });
+    if (dt.length) bucket(r.user_id).dueToday.push({ ref: loan.ref, borrower: loan.borrower, amt: dt.reduce((s, x) => s + x.amtLeft, 0) });
   }
 
   const peso = (n: number) => "₱" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -69,28 +80,33 @@ Deno.serve(async (req) => {
     return list.length > 4 ? `${shown} +${list.length - 4} more` : shown;
   };
 
-  // One summary notification each → opens the Home dashboard (overdue list, red alerts).
-  if (overdue.length) {
-    await callSendPush({
-      title: `⚠ ${overdue.length} payment${overdue.length > 1 ? "s" : ""} overdue`,
-      body: `${names(overdue)} · ${peso(overdue.reduce((s, x) => s + x.amt, 0))} outstanding`,
-      url: "./",
-      target: "all_staff",
-      tag: "overdue-daily",
-    });
-  }
-  if (dueToday.length) {
-    await callSendPush({
-      title: `${dueToday.length} payment${dueToday.length > 1 ? "s" : ""} due today`,
-      body: `${names(dueToday)} · ${peso(dueToday.reduce((s, x) => s + x.amt, 0))} due`,
-      url: "./",
-      target: "all_staff",
-      tag: "due-today",
-    });
+  // One summary notification each, per owner → opens the Home dashboard.
+  let sent = 0;
+  for (const [uid, b] of byUser) {
+    if (b.overdue.length) {
+      await callSendPush({
+        title: `⚠ ${b.overdue.length} payment${b.overdue.length > 1 ? "s" : ""} overdue`,
+        body: `${names(b.overdue)} · ${peso(b.overdue.reduce((s, x) => s + x.amt, 0))} outstanding`,
+        url: "./",
+        target: uid,
+        tag: "overdue-daily",
+      });
+      sent++;
+    }
+    if (b.dueToday.length) {
+      await callSendPush({
+        title: `${b.dueToday.length} payment${b.dueToday.length > 1 ? "s" : ""} due today`,
+        body: `${names(b.dueToday)} · ${peso(b.dueToday.reduce((s, x) => s + x.amt, 0))} due`,
+        url: "./",
+        target: uid,
+        tag: "due-today",
+      });
+      sent++;
+    }
   }
 
   return new Response(
-    JSON.stringify({ today: todayStr, overdue: overdue.length, dueToday: dueToday.length }),
+    JSON.stringify({ today: todayStr, users: byUser.size, notifications: sent }),
     { headers: { "Content-Type": "application/json" } },
   );
 });

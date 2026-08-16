@@ -33,10 +33,39 @@ Bump `VERSION` in `sw.js`. The new worker installs but **does not** call
 swaps when the user taps Update (so nobody loses a half-entered payment).
 `index.html` reloads once on `controllerchange`.
 
+### Record visibility
+
+Every record belongs to the user who created it. `loans`, `payments`,
+`transactions`, `agreements`, `queue` and `settings` each carry a `user_id`
+defaulting to `auth.uid()`, and RLS returns only rows where
+`user_id = auth.uid()` — one user never sees another's borrowers, payments or
+balances. `payments` and `agreements` additionally require the parent loan to
+belong to the caller, so a row cannot be attached to someone else's loan.
+
+`is_approved()` still wraps every policy, so a sign-in that is anonymous or not
+on the allow-list gets nothing at all — it cannot create a private silo of its
+own either. Loan refs are numbered per user (`unique (user_id, ref)`), so two
+users independently allocating `OL-0001` do not collide.
+
+Two paths bypass RLS by design and are scoped in code instead:
+
+- `overdue-check` reads every loan with the service role. It groups alerts by
+  the owning `user_id` and notifies only that owner — never `all_staff`.
+- `send-push` requires an explicit `target`; a missing one is rejected rather
+  than broadcast, so an upstream bug cannot fan one user's records out to
+  every device.
+
+Admins are the one exception: every policy reads
+`is_admin() or (is_approved() and user_id = auth.uid())`, so an account with
+`allowed_users.role = 'admin'` reads and writes across all users as an
+oversight role. `settings` is deliberately *not* treated that way in the client
+— it is per-user config, so `fetchAll` pins it to `user_id = auth.uid()` rather
+than letting an admin pick up someone else's opening balance.
+
 ### Offline behaviour
 
 - **Reads** — every successful fetch is snapshotted to `localStorage`
-  (`ohana_snapshot_v1`, minus ID photos and agreements, which would blow the
+  (`ohana_snapshot_v1_<user id>`, minus ID photos and agreements, which would blow the
   quota). A cold launch with no signal paints real data instead of an empty shell.
 - **Access check** — `is_approved` / `is_admin` results are cached per user, so
   losing signal doesn't lock staff out of their own records. This only unlocks

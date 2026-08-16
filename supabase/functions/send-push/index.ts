@@ -1,7 +1,9 @@
 // send-push — the single entry point for delivering an internal staff alert.
 //
 // POST body: { title, body?, url?, target?, exclude?, excludeEndpoint?, icon?, tag? }
-//   target:          a specific user_id, or "all_staff" (default) → everyone subscribed.
+//   target:          a specific user_id, or "all_staff" → everyone subscribed.
+//                    Required — there is no default, so a bug upstream cannot
+//                    silently broadcast one user's records to every device.
 //   exclude:         optional user_id to skip (all of that user's devices).
 //   excludeEndpoint: optional single device endpoint to skip (e.g. the exact
 //                    device that triggered the event — its other devices still get it).
@@ -20,6 +22,10 @@ Deno.serve(async (req) => {
   try {
     const { title, body, url, target, exclude, excludeEndpoint, icon, tag } = await req.json();
     if (!title) return json({ error: "title is required" }, 400);
+    // Fail closed. Records are private to their owner, so an alert with no
+    // target must not go anywhere: previously a missing/undefined target fell
+    // through to every subscribed device. Broadcasting is now opt-in only.
+    if (!target) return json({ error: "target is required (use 'all_staff' to broadcast)" }, 400);
 
     const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,

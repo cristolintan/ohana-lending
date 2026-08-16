@@ -65,14 +65,31 @@ function saveDb(db) {
 // real loans, dues and schedules instead of an empty shell. Heavy blobs (ID
 // photos, agreement forms) are stripped: they'd blow past the localStorage quota
 // and aren't needed for collections work in the field.
-const SNAP_KEY = "ohana_snapshot_v1";
-function loadSnapshot() {
-  try { const v = localStorage.getItem(SNAP_KEY); return v ? JSON.parse(v) : null; }
+// A signed-out / not-yet-loaded database. Frozen so the shared reference can't
+// be mutated into a surprise default for the next user.
+const EMPTY_DB = Object.freeze({ loans: [], payments: [], transactions: [], queue: [], settings: {} });
+
+// Keyed per user: a device can be shared, and records belong to one user only,
+// so a snapshot must never be readable by whoever signs in next.
+const SNAP_PREFIX = "ohana_snapshot_v1";
+const LEGACY_SNAP_KEY = SNAP_PREFIX;      // pre-per-user, shared by every account
+const snapKey = uid => `${SNAP_PREFIX}_${uid}`;
+
+// The old shared snapshot may hold another user's loans — drop it once, on load.
+try { localStorage.removeItem(LEGACY_SNAP_KEY); } catch {}
+
+function loadSnapshot(uid) {
+  if (!uid) return null;
+  try { const v = localStorage.getItem(snapKey(uid)); return v ? JSON.parse(v) : null; }
   catch { return null; }
 }
-function saveSnapshot(db) {
+function clearSnapshot(uid) {
+  try { if (uid) localStorage.removeItem(snapKey(uid)); } catch {}
+}
+function saveSnapshot(uid, db) {
+  if (!uid) return;
   try {
-    localStorage.setItem(SNAP_KEY, JSON.stringify({
+    localStorage.setItem(snapKey(uid), JSON.stringify({
       ...db,
       loans: (db.loans || []).map(({ idImage, agreement, ...l }) => l),
       savedAt: new Date().toISOString(),
@@ -192,14 +209,25 @@ const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.dire
 const rowToQueue = r => ({ id: r.id, borrower: r.borrower, amount: +r.amount, date: r.queue_date, note: r.note || "", status: r.status, createdAt: r.created_at });
 
 // Async CRUD — the React layer will use these instead of loadDb/saveDb.
+// Our own user id, from the locally cached session — no network round trip.
+async function myUid() {
+  const { data } = await sb.auth.getSession();
+  return data?.session?.user?.id || null;
+}
+
 const api = {
   async fetchAll() {
+    // settings is per-user config, not a record to oversee: an admin sees every
+    // user's row, so this must be pinned to our own or maybeSingle() throws on
+    // the second user's row and the admin's app fails to load.
+    const uid = await myUid();
+    if (!uid) throw new Error("Not signed in.");
     const [L, P, T, A, S, Q] = await Promise.all([
       sb.from("loans").select("*").order("ref"),
       sb.from("payments").select("*"),
       sb.from("transactions").select("*"),
       sb.from("agreements").select("*"),
-      sb.from("settings").select("*").limit(1).maybeSingle(),
+      sb.from("settings").select("*").eq("user_id", uid).maybeSingle(),
       sb.from("queue").select("*"),
     ]);
     for (const r of [L, P, T, A, S, Q]) if (r.error) throw r.error;
@@ -261,16 +289,13 @@ const api = {
   async delQueue(id) { const { error } = await sb.from("queue").delete().eq("id", id); if (error) throw error; },
   async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
   async setOpening(v) {
-    // Singleton shared settings row: update the existing one, else create it.
-    const { data: existing } = await sb.from("settings").select("user_id").limit(1).maybeSingle();
-    if (existing) {
-      const { error } = await sb.from("settings").update({ opening_balance: v }).eq("user_id", existing.user_id);
-      if (error) throw error;
-    } else {
-      const { data: u } = await sb.auth.getUser();
-      const { error } = await sb.from("settings").upsert({ user_id: u.user.id, opening_balance: v });
-      if (error) throw error;
-    }
+    // One settings row per user (user_id is the primary key), so this is a
+    // straight upsert on our own row — no lookup, and no chance of writing
+    // over someone else's opening balance.
+    const uid = await myUid();
+    if (!uid) throw new Error("Not signed in.");
+    const { error } = await sb.from("settings").upsert({ user_id: uid, opening_balance: v });
+    if (error) throw error;
   },
 };
 
@@ -1024,13 +1049,13 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
-  // Hydrate from the offline snapshot so a cold start with no signal paints real
-  // data immediately; the network refresh overwrites it moments later.
-  const [db, setDb] = useState(() => {
-    const snap = loadSnapshot();
-    const empty = { loans: [], payments: [], transactions: [], queue: [], settings: {} };
-    return snap ? { ...empty, ...snap } : empty;
-  });
+  // Starts empty: which snapshot to paint depends on who is signed in, and the
+  // session isn't resolved yet. Hydration happens in the auth effect below.
+  const [db, setDb] = useState(EMPTY_DB);
+  // Which user's snapshot has already been painted. onAuthStateChange also fires
+  // on token refresh, and re-hydrating there would flick the screen back to
+  // stale data over whatever is already loaded.
+  const hydratedFor = useRef(null);
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -1115,14 +1140,15 @@ function App() {
     return data;
   }, []);
 
-  // Auth gate: require a real (non-anonymous) login. Records are shared across all
-  // logged-in users. Data loads only once a session exists.
-  const loadShared = useCallback(async () => {
+  // Auth gate: require a real (non-anonymous) login. Every record belongs to the
+  // user who created it — RLS returns only that user's rows. Data loads only
+  // once a session exists.
+  const loadOwn = useCallback(async uid => {
     try { const d = await refresh(); setOpeningInput(String(d.settings.openingBalance || "")); }
     catch (e) {
       console.error(e);
       // The snapshot is already on screen — say what's showing instead of failing blank.
-      flash(loadSnapshot() ? "Offline — showing last synced data." : "Could not load data — check connection.");
+      flash(loadSnapshot(uid) ? "Offline — showing last synced data." : "Could not load data — check connection.");
     }
     finally { setLoading(false); }
   }, [refresh]);
@@ -1156,12 +1182,21 @@ function App() {
       }
       if (!mounted) return;
       setApproved(ok); setIsAdmin(admin);
-      if (ok) await loadShared(); else setLoading(false);
+      if (ok) {
+        // Paint this user's own last-known data before the network answers —
+        // once per user, so a token refresh doesn't undo what's on screen.
+        if (hydratedFor.current !== s.user.id) {
+          hydratedFor.current = s.user.id;
+          const snap = loadSnapshot(s.user.id);
+          setDb(snap ? { ...EMPTY_DB, ...snap } : EMPTY_DB);
+        }
+        await loadOwn(s.user.id);
+      } else setLoading(false);
       setAuthReady(true);
     };
     const { data: { subscription } } = sb.auth.onAuthStateChange((_e, s) => { apply(s); });
     return () => { mounted = false; subscription.unsubscribe(); };
-  }, [loadShared]);
+  }, [loadOwn]);
 
   // ─── Offline queue ──────────────────────────────────────────────────────────
   // Writes that can't reach Supabase are parked in the outbox and replayed on
@@ -1230,7 +1265,7 @@ function App() {
   // Keep the offline snapshot in step with whatever is on screen — server
   // refreshes and offline writes alike. Skipped during the initial load so a
   // failed first fetch can't overwrite good data with an empty shell.
-  useEffect(() => { if (!loading) saveSnapshot(db); }, [db, loading]);
+  useEffect(() => { if (!loading && session) saveSnapshot(session.user.id, db); }, [db, loading, session]);
 
   // ─── Install prompt ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1420,10 +1455,12 @@ function App() {
     // Unsynced work would sit invisible until someone signs in again — say so first.
     if (queued.length && !confirm(`${queued.length} entr${queued.length === 1 ? "y hasn't" : "ies haven't"} synced yet. Sign out anyway? They stay on this device and sync at the next sign-in.`)) return;
     try {
+      const uid = session?.user?.id;
       await sb.auth.signOut();
       // Don't leave borrower records cached on a signed-out device.
-      try { localStorage.removeItem(SNAP_KEY); } catch {}
-      setDb({ loans: [], payments: [], transactions: [], queue: [], settings: {} });
+      clearSnapshot(uid);
+      hydratedFor.current = null;
+      setDb(EMPTY_DB);
       flash("Signed out.");
     } catch (e) { console.error(e); flash("Sign out failed."); }
   };
@@ -1843,13 +1880,15 @@ function App() {
       const over = statusData ? amt - statusData.grandLeft : 0;
       if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
       else flash(`Logged ${fmt(amt)}`);
-      // Alert every other device that a payment came in — skip only this device
-      // (the one that just posted). The poster's other devices still get it.
+      // Alert this user's *other* devices that a payment came in — skip only
+      // the device that just posted. Records are private to their owner, so
+      // this is targeted at the current user rather than broadcast to all
+      // staff, which would leak the borrower and amount to other users.
       api.notify({
         title: "Payment received",
         body: `${resolved.loan.borrower} paid ${fmt(amt)} · ${resolved.loan.ref}`,
         url: `?loan=${encodeURIComponent(resolved.loan.ref)}`,
-        target: "all_staff",
+        target: session?.user?.id,
         excludeEndpoint: pushEndpoint,
       });
     } catch (e) {
