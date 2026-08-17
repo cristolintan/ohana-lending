@@ -1144,6 +1144,7 @@ function App() {
   // photo calls refresh(), which swaps db.loans for fresh objects — a captured
   // object would keep painting the old idImage.
   const [sheetLoanId, setSheetLoanId] = useState(null);
+  const [exportBusy, setExportBusy] = useState(false);   // schedule PNG is being rendered
 
   // ── PWA state: connectivity, offline queue, install, update ──
   const [online, setOnline] = useState(() => navigator.onLine);
@@ -1356,47 +1357,32 @@ function App() {
     setTab("status");
   };
 
+  // Captures the off-screen export document, not the on-screen card. The card is
+  // built for a phone — a fixed-width scroller that crops to whatever columns
+  // happen to be visible — whereas the document is laid out once at a readable
+  // width with the loan terms and totals a bare schedule doesn't convey.
   const exportSchedulePng = async () => {
-    const el = document.getElementById("projected-export");
+    const el = document.getElementById("schedule-export-doc");
     if (!el || !window.html2canvas) { flash("Image tools not ready — reload once online."); return; }
-    // On a phone the table is wider than the screen, so only the first few
-    // columns are actually on screen. Capturing the card as-is crops the rest:
-    // the scroller clips to its visible width, and the card itself is
-    // overflow-hidden for its rounded corners. Measure the table's true width
-    // and un-clip both — inside html2canvas's cloned document, so the page the
-    // user is looking at never jumps.
-    const scroller = el.querySelector(".overflow-x-auto");
-    const fullWidth = Math.ceil(Math.max(
-      el.getBoundingClientRect().width,
-      scroller ? scroller.scrollWidth : 0,
-    ));
+    setExportBusy(true);
     try {
+      const w = el.offsetWidth, h = el.offsetHeight;
+      // iOS caps how many pixels a canvas may hold; a 240-installment schedule
+      // at 2× would sail past it and come back blank. Trade sharpness for a
+      // picture that actually renders.
+      const scale = Math.max(1, Math.min(2, Math.sqrt(12e6 / Math.max(1, w * h))));
       const canvas = await window.html2canvas(el, {
-        scale: 2,
+        scale,
         backgroundColor: "#ffffff",
-        width: fullWidth,
-        // The clone is laid out in a viewport this wide, or the table would be
-        // squeezed back down to phone width before it is painted.
-        windowWidth: Math.max(document.documentElement.clientWidth, fullWidth),
-        ignoreElements: n => n.classList && n.classList.contains("no-capture"),
-        onclone: doc => {
-          const card = doc.getElementById("projected-export");
-          if (!card) return;
-          const widen = node => {
-            if (!node) return;
-            node.style.width = `${fullWidth}px`;
-            node.style.maxWidth = "none";
-            node.style.overflow = "visible";
-          };
-          widen(card);
-          widen(card.querySelector(".overflow-x-auto"));
-        },
+        width: w, height: h, windowWidth: w, windowHeight: h,
       });
       const a = document.createElement("a");
       a.href = canvas.toDataURL("image/png");
-      a.download = `Schedule - ${name.trim() || "loan"}.png`;
+      a.download = `Payment Schedule - ${name.trim() || "loan"}.png`;
       document.body.appendChild(a); a.click(); a.remove();
+      flash("Schedule image saved.");
     } catch (e) { console.error(e); flash("Could not export image."); }
+    finally { setExportBusy(false); }
   };
 
   const editLoan = l => {
@@ -2305,7 +2291,11 @@ function App() {
                   <p className="font-semibold text-slate-800">Projected Schedule</p>
                   <p className="text-xs text-slate-500">{name.trim() || "Unnamed"}</p>
                 </div>
-                <button onClick={exportSchedulePng} className="no-capture px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-semibold active:bg-slate-100 transition">⬇ Export Table</button>
+                <button onClick={exportSchedulePng} disabled={exportBusy}
+                  className="no-capture shrink-0 min-h-[44px] px-4 rounded-xl bg-emerald-50 text-emerald-700 text-sm font-semibold flex items-center gap-2 active:bg-emerald-100 disabled:opacity-60 transition">
+                  <i data-lucide={exportBusy ? "loader" : "image-down"} className={`w-4 h-4 ${exportBusy ? "animate-spin" : ""}`}></i>
+                  {exportBusy ? "Preparing…" : "Save image"}
+                </button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -2824,6 +2814,85 @@ function App() {
           : <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">Loan not found. <button onClick={() => setTab("records")} className="text-emerald-600 font-semibold underline">Back to records</button></div>)}
         </div>
       </main>
+
+      {/* ── Schedule export document ──────────────────────────────────────────
+          What "Save image" actually captures. Parked off-screen (never visible,
+          but laid out, so html2canvas can measure it) at a fixed readable width
+          instead of the phone's. The on-screen card is a compact preview; this
+          is the artifact a borrower receives, so it carries the things a bare
+          table can't: who the loan is for, when the money is released, and what
+          it costs in total. Lives outside <main> so nothing clips it. */}
+      {calc.rows.length > 0 && (
+        <div id="schedule-export-doc" aria-hidden="true"
+          style={{ position: "fixed", top: 0, left: "-10000px", width: "760px", background: "#ffffff" }}>
+          <div className="px-9 pt-9 pb-7">
+            <p className="text-[11px] font-bold tracking-[0.18em] text-emerald-600">PAYMENT SCHEDULE</p>
+            <p className="mt-1 text-3xl font-bold text-slate-900 leading-tight">{name.trim() || "Unnamed borrower"}</p>
+            <p className="mt-1.5 text-sm text-slate-500">
+              Release date <span className="font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
+              <span className="text-slate-300"> · </span>
+              {Math.floor(Number(terms) || 0)} {frequency.toLowerCase()} payments
+              <span className="text-slate-300"> · </span>
+              {flatRate}% flat{Number(dropRate) !== Number(flatRate) ? ` · ${dropRate}% diminishing` : ""}
+            </p>
+
+            <div className="mt-6 grid grid-cols-3 gap-3">
+              <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Loan amount</p>
+                <p className="mt-0.5 text-xl font-bold text-slate-900 tabular-nums">{fmt(amount)}</p>
+              </div>
+              <div className="rounded-2xl bg-amber-50 px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-600">Total interest</p>
+                <p className="mt-0.5 text-xl font-bold text-amber-700 tabular-nums">{fmt(calc.totalInterest)}</p>
+              </div>
+              <div className="rounded-2xl bg-emerald-50 px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">Total repayment</p>
+                <p className="mt-0.5 text-xl font-bold text-emerald-700 tabular-nums">{fmt(calc.totalRepay)}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Due date sits second: it is the column a borrower reads first. */}
+          <table className="w-full text-sm" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr className="bg-slate-100 text-slate-500">
+                <th className="px-4 py-2.5 text-left text-xs font-bold uppercase tracking-wide">No.</th>
+                <th className="px-4 py-2.5 text-left text-xs font-bold uppercase tracking-wide">Due date</th>
+                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Principal</th>
+                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Interest</th>
+                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Amount due</th>
+                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {calc.rows.map((r, i) => (
+                <tr key={r.period} className={i % 2 ? "bg-slate-50" : "bg-white"}>
+                  {/* slate-500 not 400: this is a document someone has to read,
+                      and 400 on white falls under the AA contrast floor. */}
+                  <td className="px-4 py-2.5 font-semibold text-slate-500 tabular-nums">{r.period}</td>
+                  <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{fmtDate(r.due)}</td>
+                  <td className="px-4 py-2.5 text-right text-slate-600 tabular-nums">{fmt(r.principal)}</td>
+                  <td className="px-4 py-2.5 text-right text-amber-600 tabular-nums">{fmt(r.interest)}</td>
+                  <td className="px-4 py-2.5 text-right font-bold text-slate-900 tabular-nums">{fmt(r.total)}</td>
+                  <td className="px-4 py-2.5 text-right text-slate-500 tabular-nums">{fmt(r.remaining)}</td>
+                </tr>
+              ))}
+              <tr className="bg-emerald-50">
+                <td className="px-4 py-3 font-bold text-emerald-800" colSpan={2}>Total</td>
+                <td className="px-4 py-3 text-right font-bold text-slate-700 tabular-nums">{fmt(amount)}</td>
+                <td className="px-4 py-3 text-right font-bold text-amber-700 tabular-nums">{fmt(calc.totalInterest)}</td>
+                <td className="px-4 py-3 text-right font-bold text-emerald-700 tabular-nums">{fmt(calc.totalRepay)}</td>
+                <td className="px-4 py-3"></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div className="px-9 py-5 border-t border-slate-100 flex items-baseline justify-between">
+            <p className="text-xs text-slate-500">Projection only — not a receipt. Amounts assume every installment is paid in full and on time.</p>
+            <p className="text-xs text-slate-500 whitespace-nowrap ml-4">Generated {fmtDate(new Date())}</p>
+          </div>
+        </div>
+      )}
 
       {/* Bottom Tab Bar — 2 tabs · center FAB (New Loan) · 2 tabs */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur border-t border-slate-100 flex items-stretch z-20" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>

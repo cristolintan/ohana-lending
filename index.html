@@ -157,6 +157,30 @@
       #agreement-print .border-slate-100,
       #agreement-print .border-slate-200,
       #agreement-print .border-slate-400 { border-color: #cbd5e1 !important; }
+
+      /* Same reasoning for the schedule export: the PNG is sent to a borrower,
+         so it must be light "paper" no matter which theme the sender's phone is
+         in. Without this the dark remap above bakes a dark, low-contrast image —
+         the loan amount and the Amount-due column all but vanish. */
+      #schedule-export-doc { background: #ffffff !important; }
+      #schedule-export-doc .bg-white    { background-color: #ffffff !important; }
+      #schedule-export-doc .bg-slate-50 { background-color: #f8fafc !important; }
+      #schedule-export-doc .bg-slate-100{ background-color: #f1f5f9 !important; }
+      #schedule-export-doc .bg-emerald-50 { background-color: #ecfdf5 !important; }
+      #schedule-export-doc .bg-amber-50   { background-color: #fffbeb !important; }
+      #schedule-export-doc .text-slate-900 { color: #0f172a !important; }
+      #schedule-export-doc .text-slate-800 { color: #1e293b !important; }
+      #schedule-export-doc .text-slate-700 { color: #334155 !important; }
+      #schedule-export-doc .text-slate-600 { color: #475569 !important; }
+      #schedule-export-doc .text-slate-500 { color: #64748b !important; }
+      #schedule-export-doc .text-slate-400 { color: #94a3b8 !important; }
+      #schedule-export-doc .text-slate-300 { color: #cbd5e1 !important; }
+      #schedule-export-doc .text-emerald-800 { color: #065f46 !important; }
+      #schedule-export-doc .text-emerald-700 { color: #047857 !important; }
+      #schedule-export-doc .text-emerald-600 { color: #059669 !important; }
+      #schedule-export-doc .text-amber-700 { color: #b45309 !important; }
+      #schedule-export-doc .text-amber-600 { color: #d97706 !important; }
+      #schedule-export-doc .border-slate-100 { border-color: #e2e8f0 !important; }
     }
     /* Smooth momentum scroll on iOS */
     .scroll-ios { -webkit-overflow-scrolling: touch; overflow-y: auto; }
