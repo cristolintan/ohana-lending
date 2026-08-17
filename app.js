@@ -1145,6 +1145,10 @@ function App() {
   // object would keep painting the old idImage.
   const [sheetLoanId, setSheetLoanId] = useState(null);
   const [exportBusy, setExportBusy] = useState(false);   // schedule PNG is being rendered
+  // The rendered PNG, held for a preview + share step. iOS needs the share call
+  // to happen inside its own tap (see shareScheduleImage), and showing the image
+  // first also lets you see what you're about to send.
+  const [shareImg, setShareImg] = useState(null);        // { url, blob, filename }
 
   // ── PWA state: connectivity, offline queue, install, update ──
   const [online, setOnline] = useState(() => navigator.onLine);
@@ -1376,13 +1380,43 @@ function App() {
         backgroundColor: "#ffffff",
         width: w, height: h, windowWidth: w, windowHeight: h,
       });
-      const a = document.createElement("a");
-      a.href = canvas.toDataURL("image/png");
-      a.download = `Payment Schedule - ${name.trim() || "loan"}.png`;
-      document.body.appendChild(a); a.click(); a.remove();
-      flash("Schedule image saved.");
+      // toBlob, not toDataURL: a Blob can be wrapped in a File for the iOS share
+      // sheet, and it doesn't carry the ~33% base64 overhead of a data: URL.
+      const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+      if (!blob) throw new Error("canvas produced no image");
+      setShareImg(prev => {
+        if (prev) URL.revokeObjectURL(prev.url);
+        return { url: URL.createObjectURL(blob), blob,
+                 filename: `Payment Schedule - ${name.trim() || "loan"}.png` };
+      });
     } catch (e) { console.error(e); flash("Could not export image."); }
     finally { setExportBusy(false); }
+  };
+
+  const closeShareImg = () => setShareImg(prev => { if (prev) URL.revokeObjectURL(prev.url); return null; });
+
+  // Must be called straight from a tap. iOS only honours navigator.share while a
+  // user gesture is still "active", and rendering the canvas takes long enough to
+  // spend that activation — which is why the image is previewed first and shared
+  // from a second, fresh tap rather than automatically after export.
+  const shareScheduleImage = async () => {
+    if (!shareImg) return;
+    const file = new File([shareImg.blob], shareImg.filename, { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: shareImg.filename });
+        closeShareImg();
+        return;
+      } catch (e) {
+        if (e && e.name === "AbortError") return;      // user dismissed the sheet
+        console.error(e);
+      }
+    }
+    // No share sheet (desktop, or an older iOS): fall back to a download.
+    const a = document.createElement("a");
+    a.href = shareImg.url; a.download = shareImg.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    flash("Image downloaded.");
   };
 
   const editLoan = l => {
@@ -2013,6 +2047,17 @@ function App() {
   // Deliberately NOT on every db change — that would eject the user mid-upload.
   useEffect(() => { if (sheetLoanId && !sheetLoan) setSheetLoanId(null); }, [sheetLoanId, sheetLoan]);
   useEffect(() => { setSheetLoanId(null); }, [tab]);
+
+  // The preview holds an object URL, so closing it has to revoke rather than
+  // just null the state — on Escape, on leaving the tab, and on unmount.
+  useEffect(() => {
+    if (!shareImg) return;
+    const onKey = e => { if (e.key === "Escape") closeShareImg(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [shareImg]);
+  useEffect(() => { closeShareImg(); }, [tab]);
+  useEffect(() => () => { if (shareImg) URL.revokeObjectURL(shareImg.url); }, []);
   useEffect(() => {
     if (!sheetLoanId) return;
     const onKey = e => { if (e.key === "Escape") setSheetLoanId(null); };
@@ -2814,6 +2859,59 @@ function App() {
           : <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">Loan not found. <button onClick={() => setTab("records")} className="text-emerald-600 font-semibold underline">Back to records</button></div>)}
         </div>
       </main>
+
+      {/* ── Exported image: preview, then share ───────────────────────────────
+          Not just decoration. On iOS the only reliable way to get a file out of
+          a standalone PWA is navigator.share, and share() must run inside a live
+          user gesture — which rendering the canvas uses up. So the image is shown
+          here and sent from a fresh tap. The share sheet is also the only route
+          to Photos or straight into Messenger; a plain download lands in Files. */}
+      {shareImg && (
+        <div className="no-print fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={closeShareImg}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[92vh] overflow-y-auto overscroll-contain scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800">Schedule image ready</p>
+                  <p className="text-xs text-slate-400 truncate">{name.trim() || "Unnamed borrower"}</p>
+                </div>
+                <button onClick={closeShareImg} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+
+            <div className="px-4 py-4 space-y-3">
+              <div className="rounded-xl border border-slate-200 overflow-hidden bg-slate-50">
+                <img src={shareImg.url} alt="Payment schedule preview" className="w-full block" />
+              </div>
+
+              <button onClick={shareScheduleImage}
+                className="w-full min-h-[48px] rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold flex items-center justify-center gap-2 transition">
+                <i data-lucide="share-2" className="w-4 h-4"></i>
+                Save or send
+              </button>
+
+              {/* A real link, so a long-press offers "Save to Photos" even when
+                  the share sheet is unavailable. */}
+              <a href={shareImg.url} download={shareImg.filename}
+                className="w-full min-h-[44px] rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold flex items-center justify-center gap-2 active:bg-slate-100 transition">
+                <i data-lucide="arrow-down-to-line" className="w-4 h-4"></i>
+                Download file
+              </a>
+
+              <p className="text-[11px] text-slate-400 leading-relaxed px-1">
+                <span className="font-semibold text-slate-500">Save or send</span> opens your phone's share sheet — choose
+                <span className="font-semibold text-slate-500"> Save Image</span> to put it in Photos, or pick a chat to send it straight to the borrower.
+                <span className="font-semibold text-slate-500"> Download file</span> saves to Files → Downloads instead.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Schedule export document ──────────────────────────────────────────
           What "Save image" actually captures. Parked off-screen (never visible,
