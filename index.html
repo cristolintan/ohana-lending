@@ -93,6 +93,10 @@
       .text-slate-300 { color: #6a6a72 !important; }
 
       /* Borders */
+      /* Tailwind writes divide-* onto the child selector, so the .border-*
+         remaps below never reach a divided list. Mirror the two we use. */
+      .divide-slate-50  > * + * { border-color: #29292f !important; }
+      .divide-slate-100 > * + * { border-color: #2d2d34 !important; }
       .border-slate-50   { border-color: #29292f !important; }
       .border-slate-100  { border-color: #2d2d34 !important; }
       .border-slate-200  { border-color: #38383f !important; }
