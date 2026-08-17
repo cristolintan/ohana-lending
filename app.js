@@ -431,14 +431,27 @@ function computeStatus(loan, allPayments) {
 }
 
 // ─── Cash flow helpers ─────────────────────────────────────────────────────────
-// Inclusive [start, end] YYYY-MM-DD bounds for a date-range preset (local time).
-function rangeBounds(preset) {
-  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const now = new Date(), end = iso(now);
-  if (preset === "month") return [iso(new Date(now.getFullYear(), now.getMonth(), 1)), end];
-  if (preset === "30d") { const s = new Date(now); s.setDate(s.getDate() - 29); return [iso(s), end]; }
-  if (preset === "year") return [iso(new Date(now.getFullYear(), 0, 1)), end];
-  return ["0000-01-01", "9999-12-31"]; // all time
+// Local-time YYYY-MM-DD. Deliberately not toISOString(), which shifts to UTC and
+// can hand back "yesterday" for anyone east of Greenwich.
+const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const monthKeyOf = d => isoDay(d).slice(0, 7);
+// Inclusive [start, end] bounds for a calendar month key ("YYYY-MM").
+function monthBounds(key) {
+  const [y, m] = key.split("-").map(Number);
+  return [`${key}-01`, `${key}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}`];
+}
+const ALL_TIME = ["0000-01-01", "9999-12-31"];
+const shiftMonth = (key, delta) => { const [y, m] = key.split("-").map(Number); return monthKeyOf(new Date(y, m - 1 + delta, 1)); };
+const monthLabelLong = key => { const [y, m] = key.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }); };
+const monthLabelShort = key => { const [y, m] = key.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "short" }) + " " + String(y).slice(2); };
+// "Today" / "Yesterday" / "Mon, Aug 18" — how a ledger day reads in a timeline.
+function dayHeading(dateStr) {
+  const t = new Date(); const y = new Date(); y.setDate(y.getDate() - 1);
+  if (dateStr === isoDay(t)) return "Today";
+  if (dateStr === isoDay(y)) return "Yesterday";
+  const d = parseDate(dateStr);
+  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+    + (d.getFullYear() !== t.getFullYear() ? `, ${d.getFullYear()}` : "");
 }
 
 // Realized interest recognized for a loan from payments up to a cutoff date.
@@ -468,6 +481,48 @@ const TX_TYPES = [
   ["Other Expense", "out"]
 ];
 const txDir = cat => { const f = TX_TYPES.find(t => t[0] === cat); return f ? f[1] : "in"; };
+
+// How each cash movement is presented in the timeline. Every entry carries an
+// icon and a word for its direction, so the +/− reading never depends on colour
+// alone. `group` is what the filter sheet buckets by.
+const TXN_META = {
+  "Disbursement":       { label: "Loan released",      icon: "arrow-up-right",   group: "releases" },
+  "Collection":         { label: "Payment collected",  icon: "arrow-down-left",  group: "collections" },
+  "Scheduled Due":      { label: "Scheduled due",      icon: "calendar-clock",   group: "collections" },
+  "Capital Injection":  { label: "Capital added",      icon: "piggy-bank",       group: "capital" },
+  "Penalty / Late Fee": { label: "Late fee collected", icon: "alert-triangle",   group: "fees" },
+  "Processing Fee":     { label: "Processing fee",     icon: "percent",          group: "fees" },
+  "Other Income":       { label: "Other income",       icon: "coins",            group: "fees" },
+  "Operating Expense":  { label: "Operating expense",  icon: "receipt",          group: "expenses" },
+  "Withdrawal":         { label: "Withdrawal",         icon: "banknote",         group: "capital" },
+  "Other Expense":      { label: "Other expense",      icon: "wallet",           group: "expenses" },
+};
+const txnMeta = kind => TXN_META[kind] || { label: kind || "Cash entry", icon: "wallet", group: "other" };
+
+// Cash-flow filter buckets, in the order the sheet lists them.
+const CF_GROUPS = [
+  ["all", "All movements"],
+  ["collections", "Collections"],
+  ["releases", "Loan releases"],
+  ["fees", "Fees & other income"],
+  ["capital", "Capital & withdrawals"],
+  ["expenses", "Expenses"],
+];
+
+// Principal recovered so far on a loan. Mirrors realizedInterestUpTo: payments
+// are applied to the schedule oldest-first and each covered slice is split by
+// that installment's principal/interest ratio. Read-only — it never feeds a
+// balance the borrower sees, only the "money still tied up in loans" tile.
+function principalRecovered(st) {
+  let left = st.totalLogged, principal = 0;
+  for (const r of st.rows) {
+    if (left <= 1e-9) break;
+    const applied = Math.min(left, r.total);
+    if (r.total > 0) principal += applied * (r.principal / r.total);
+    left -= applied;
+  }
+  return principal;
+}
 
 // ─── Tiny components ─────────────────────────────────────────────────────────
 // Minimal design tokens — reused across every screen.
@@ -551,24 +606,110 @@ function Toast({ msg }) {
   );
 }
 
-// ─── Lightweight inline-SVG charts (no dependency, print- and offline-friendly) ─
-function MiniBars({ data, fmt }) {
-  if (!data.length) return <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>;
-  const max = Math.max(1, ...data.map(d => Math.max(d.inflow + (d.projIn || 0), d.outflow)));
-  const groupW = 52, barW = 18, gap = 6, h = 130, pad = 6, labelH = 22;
-  const W = data.length * groupW;
+// ─── Cash-flow UI primitives ─────────────────────────────────────────────────
+// Pill segmented control (period aggregation, ledger direction). One row, equal
+// widths, 44px-tall targets — thumb-friendly and identical on every breakpoint.
+function Segmented({ value, onChange, options, size = "sm" }) {
   return (
-    <div className="overflow-x-auto px-4 pb-3">
-      <svg width={W} height={h + labelH} className="block">
+    <div className="flex gap-1 p-1 bg-slate-100 rounded-xl" role="tablist">
+      {options.map(([k, lbl]) => (
+        <button key={k} role="tab" aria-selected={value === k} onClick={() => onChange(k)}
+          className={`flex-1 rounded-lg font-semibold transition ${size === "sm" ? "py-1.5 text-xs" : "py-2 text-sm"} ${
+            value === k ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 active:bg-slate-200"}`}>{lbl}</button>
+      ))}
+    </div>
+  );
+}
+
+// Section heading used by every cash-flow card, so each block announces what it
+// is before the numbers land.
+function CardHead({ title, hint, right }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="font-semibold text-slate-800 text-sm">{title}</p>
+        {hint && <p className="text-xs text-slate-400 mt-0.5">{hint}</p>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+// One line of a Money In / Money Out breakdown.
+function FlowLine({ label, value, muted }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 text-xs">
+      <span className={`truncate ${muted ? "text-slate-300" : "text-slate-500"}`}>{label}</span>
+      <span className={`tabular-nums shrink-0 ${muted ? "text-slate-300" : "text-slate-600 font-medium"}`}>{value}</span>
+    </div>
+  );
+}
+
+// Empty / no-data panel. Never a blank card — always says what would show here.
+function EmptyPanel({ icon = "inbox", title, body, action, onAction }) {
+  return (
+    <div className="px-6 py-10 text-center">
+      <div className="w-11 h-11 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center">
+        <i data-lucide={icon} className="w-5 h-5"></i>
+      </div>
+      <p className="mt-3 font-semibold text-slate-700 text-sm">{title}</p>
+      {body && <p className="mt-1 text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">{body}</p>}
+      {action && <button onClick={onAction} className="mt-4 px-4 py-2 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-xs font-semibold transition">{action}</button>}
+    </div>
+  );
+}
+
+// First-paint placeholder for the Cash Flow tab. Same shapes as the real cards,
+// so nothing jumps when the data lands and no empty card ever flashes.
+function CashFlowSkeleton() {
+  const bar = "bg-slate-100 rounded animate-pulse";
+  return (
+    <div className="space-y-4" aria-busy="true" aria-label="Loading cash flow">
+      <div className={`${cardCls} p-4 space-y-3`}>
+        <div className={`${bar} h-4 w-28`} /><div className={`${bar} h-10 w-full`} />
+      </div>
+      <div className={`${cardCls} p-5 space-y-3`}>
+        <div className={`${bar} h-3 w-24`} /><div className={`${bar} h-10 w-48`} /><div className={`${bar} h-3 w-36`} />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        {[0, 1].map(i => <div key={i} className={`${cardCls} p-4 space-y-2`}><div className={`${bar} h-3 w-16`} /><div className={`${bar} h-6 w-24`} /></div>)}
+      </div>
+      <div className={`${cardCls} p-4 space-y-3`}>
+        <div className={`${bar} h-4 w-32`} /><div className={`${bar} h-32 w-full`} />
+      </div>
+      <div className={`${cardCls} p-4 space-y-3`}>
+        <div className={`${bar} h-4 w-24`} />
+        {[0, 1, 2, 3].map(i => <div key={i} className="flex items-center gap-3"><div className={`${bar} h-9 w-9 rounded-full`} /><div className="flex-1 space-y-1.5"><div className={`${bar} h-3 w-2/5`} /><div className={`${bar} h-2.5 w-1/4`} /></div><div className={`${bar} h-3 w-16`} /></div>)}
+      </div>
+    </div>
+  );
+}
+
+// ─── Lightweight inline-SVG charts (no dependency, print- and offline-friendly) ─
+// Cash In vs Cash Out. Money in grows up from a centre axis, money out grows
+// down from it, so "am I collecting more than I'm releasing?" is answered by
+// which side of the line is taller — no axis reading, no legend hunting.
+// `data` is [{ key, label, inflow, outflow, projIn, projected }].
+function FlowChart({ data, fmt }) {
+  if (!data.length) return <EmptyPanel icon="bar-chart-3" title="Nothing to chart yet" body="Collections and loan releases in this period will plot here." />;
+  const max = Math.max(1, ...data.map(d => Math.max(d.inflow + (d.projIn || 0), d.outflow)));
+  const barW = data.length > 16 ? 8 : data.length > 8 ? 14 : 20;
+  const groupW = barW * 2 + (data.length > 16 ? 8 : 16);
+  const half = 62, labelH = 20, W = Math.max(data.length * groupW, 40), H = half * 2 + labelH;
+  const h = v => (v <= 0 ? 0 : Math.max(2, (v / max) * (half - 6)));
+  return (
+    <div className="overflow-x-auto px-4 pb-3 pt-1">
+      <svg width={W} height={H} className="block" role="img" aria-label="Cash in versus cash out">
+        <line x1="0" y1={half} x2={W} y2={half} stroke="currentColor" className="text-slate-300" strokeWidth="1" />
         {data.map((d, i) => {
-          const gx = i * groupW + (groupW - (barW * 2 + gap)) / 2;
-          const inH = (d.inflow / max) * h, projH = ((d.projIn || 0) / max) * h, outH = (d.outflow / max) * h;
+          const cx = i * groupW + groupW / 2;
+          const inH = h(d.inflow), projH = h(d.projIn || 0), outH = h(d.outflow);
           return (
             <g key={d.key}>
-              {inH > 0 && <rect x={gx} y={pad + h - inH} width={barW} height={inH} rx="2" fill="#10b981"><title>{d.label} · In {fmt(d.inflow)}</title></rect>}
-              {projH > 0 && <rect x={gx} y={pad + h - inH - projH} width={barW} height={projH} rx="2" fill="#6ee7b7"><title>{d.label} · Projected {fmt(d.projIn)}</title></rect>}
-              {outH > 0 && <rect x={gx + barW + gap} y={pad + h - outH} width={barW} height={outH} rx="2" fill="#fbbf24"><title>{d.label} · Out {fmt(d.outflow)}</title></rect>}
-              <text x={i * groupW + groupW / 2} y={h + labelH - 6} textAnchor="middle" fontSize="9" fill={d.projected ? "#cbd5e1" : "#94a3b8"}>{d.label}</text>
+              {inH > 0 && <rect x={cx - barW - 1} y={half - inH} width={barW} height={inH} rx="2" fill="#10b981"><title>{`${d.label} · in ${fmt(d.inflow)}`}</title></rect>}
+              {projH > 0 && <rect x={cx - barW - 1} y={half - inH - projH} width={barW} height={projH} rx="2" fill="#6ee7b7" opacity="0.75"><title>{`${d.label} · expected ${fmt(d.projIn)}`}</title></rect>}
+              {outH > 0 && <rect x={cx + 1} y={half} width={barW} height={outH} rx="2" fill="#f59e0b"><title>{`${d.label} · out ${fmt(d.outflow)}`}</title></rect>}
+              <text x={cx} y={H - 6} textAnchor="middle" fontSize="9" fill={d.projected ? "#6a6a72" : "#94a3b8"}>{d.label}</text>
             </g>
           );
         })}
@@ -1096,9 +1237,22 @@ function App() {
   const [agreementLoanId, setAgreementLoanId] = useState(null);
   const [recordFilter, setRecordFilter] = useState("active");
   const [recordSearch, setRecordSearch] = useState("");
-  const [cfRange, setCfRange] = useState("all");
-  const [cfDir, setCfDir] = useState("all");
+  // ── Cash flow view state ──
+  // Period is a calendar month by default (what a lender actually reconciles),
+  // with an all-time escape hatch. Aggregation only re-buckets the same rows.
+  const [cfMonth, setCfMonth] = useState(() => isoDay(new Date()).slice(0, 7));
+  const [cfAllTime, setCfAllTime] = useState(false);
+  const [cfAgg, setCfAgg] = useState("weekly");     // daily | weekly | monthly
+  const [cfDir, setCfDir] = useState("all");        // all | in | out
+  const [cfGroup, setCfGroup] = useState("all");    // CF_GROUPS key
+  const [cfSearch, setCfSearch] = useState("");     // borrower or loan ref
   const [cfProjected, setCfProjected] = useState(false);
+  const [cfFilterOpen, setCfFilterOpen] = useState(false);
+  const [cfEntryOpen, setCfEntryOpen] = useState(false);
+  // Forecast horizon. Defaults to 30 days out, but the lender picks the date —
+  // "how much cash will I have by payday / by the 15th" is the real question.
+  const [cfForecastDate, setCfForecastDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() + 30); return isoDay(d); });
+  const [loadError, setLoadError] = useState(false);
   const [txDate, setTxDate] = useState(today());
   const [txCat, setTxCat] = useState("Capital Injection");
   const [txAmount, setTxAmount] = useState("");
@@ -1174,10 +1328,11 @@ function App() {
   // user who created it — RLS returns only that user's rows. Data loads only
   // once a session exists.
   const loadOwn = useCallback(async uid => {
-    try { const d = await refresh(); setOpeningInput(String(d.settings.openingBalance || "")); }
+    try { const d = await refresh(); setOpeningInput(String(d.settings.openingBalance || "")); setLoadError(false); }
     catch (e) {
       console.error(e);
       // The snapshot is already on screen — say what's showing instead of failing blank.
+      setLoadError(true);
       flash(loadSnapshot(uid) ? "Offline — showing last synced data." : "Could not load data — check connection.");
     }
     finally { setLoading(false); }
@@ -1604,11 +1759,9 @@ function App() {
   }, [db.loans, db.payments, recordFilter, recordSearch]);
 
   const cashflow = useMemo(() => {
-    const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const monthLabel = key => { const [y, m] = key.split("-"); return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short" }) + " " + y.slice(2); };
-    const [start, end] = rangeBounds(cfRange);
+    const [start, end] = cfAllTime ? ALL_TIME : monthBounds(cfMonth);
     const opening = Number(db.settings && db.settings.openingBalance) || 0;
-    const todayStr = iso(new Date()), curMonth = todayStr.slice(0, 7);
+    const todayStr = isoDay(new Date()), curMonth = todayStr.slice(0, 7);
 
     // Actual cash events: disbursements (out), collections (in), manual entries (in/out).
     const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
@@ -1617,13 +1770,16 @@ function App() {
       return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, ref: loan ? loan.ref : "", borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
     });
     const manual = (db.transactions || []).map(t => ({
-      id: "M-" + t.id, date: t.date, kind: t.kind, subtype: "", note: t.note, loanId: null, borrower: "",
+      id: "M-" + t.id, txId: t.id, date: t.date, kind: t.kind, subtype: "", note: t.note, loanId: null, borrower: "", pending: !!t.pending,
       inflow: t.direction === "in" ? Number(t.amount) || 0 : 0, outflow: t.direction === "out" ? Number(t.amount) || 0 : 0
     }));
     const actual = [...disb, ...coll, ...manual].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
     let bal = opening;
-    actual.forEach((t, i) => { bal += t.inflow - t.outflow; t.balance = bal; t.seq = i; });
+    actual.forEach(t => { bal += t.inflow - t.outflow; t.balance = bal; });
     const inRange = actual.filter(t => t.date >= start && t.date <= end);
+
+    // Cash at the period's open — the comparison point for "is my position improving?".
+    const openingForPeriod = actual.filter(t => t.date < start).reduce((v, t) => v + t.inflow - t.outflow, opening);
 
     // Projected upcoming dues (only when toggled on), continuing the running balance.
     const projected = [];
@@ -1633,50 +1789,197 @@ function App() {
           if (r.status === "PAID" || r.amtLeft <= 0.005) return;
           // Include every remaining unpaid installment. Overdue ones (due date in the
           // past) are expected "now", so clamp them to today rather than dropping them.
-          const dueISO = iso(r.due);
+          const dueISO = isoDay(r.due);
           const date = dueISO < todayStr ? todayStr : dueISO;
           projected.push({ id: `X-${l.id}-${idx}`, date, kind: "Scheduled Due", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: r.amtLeft, outflow: 0, projected: true });
         });
       });
       projected.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-      let pbal = bal;
-      projected.forEach((t, i) => { pbal += t.inflow; t.balance = pbal; t.seq = actual.length + i; });
     }
 
-    // KPIs (actuals in range).
+    // Display order: strictly by date, real movements ahead of expected dues on
+    // the same day. Balances are re-run across the merged chain when dues are
+    // shown, so a due dated after a future-dated real entry still reads on from
+    // it. `bal` above is untouched — Available Cash stays actual-only.
+    const chrono = [...actual, ...projected].sort((a, b) =>
+      a.date < b.date ? -1 : a.date > b.date ? 1
+      : (!!a.projected === !!b.projected ? 0 : a.projected ? 1 : -1));
+    if (cfProjected) {
+      let run = opening;
+      chrono.forEach(t => { run += t.inflow - t.outflow; t.balance = run; });
+    }
+    chrono.forEach((t, i) => { t.order = i; });
+
+    // ── Period totals (actuals only) ──
     const collected = inRange.filter(t => t.kind === "Collection").reduce((s, t) => s + t.inflow, 0);
+    const collectedCount = inRange.filter(t => t.kind === "Collection").length;
     const disbursed = inRange.filter(t => t.kind === "Disbursement").reduce((s, t) => s + t.outflow, 0);
-    const net = inRange.reduce((s, t) => s + t.inflow - t.outflow, 0);
+    const releasedCount = inRange.filter(t => t.kind === "Disbursement").length;
+    const manualIn = inRange.filter(t => t.txId && t.inflow > 0);
+    const manualOut = inRange.filter(t => t.txId && t.outflow > 0);
+    const sumIn = rows => rows.reduce((s, t) => s + t.inflow, 0);
+    const sumOut = rows => rows.reduce((s, t) => s + t.outflow, 0);
     const interest = db.loans.reduce((sum, l) =>
       sum + realizedInterestUpTo(l, db.payments, end, true) - realizedInterestUpTo(l, db.payments, start, false), 0);
-    const expected = projected.reduce((s, t) => s + t.inflow, 0);
+    const principalIn = Math.max(0, collected - interest);
+    const feeIncome = sumIn(manualIn.filter(t => txnMeta(t.kind).group === "fees"));
+    const capitalIn = sumIn(manualIn.filter(t => txnMeta(t.kind).group === "capital"));
+    const otherIn = sumIn(manualIn) - feeIncome - capitalIn;
+    const withdrawals = sumOut(manualOut.filter(t => t.kind === "Withdrawal"));
+    const expenses = sumOut(manualOut.filter(t => txnMeta(t.kind).group === "expenses"));
+    const otherOut = sumOut(manualOut) - withdrawals - expenses;
+    const moneyIn = collected + sumIn(manualIn);
+    const moneyOut = disbursed + sumOut(manualOut);
+    const net = moneyIn - moneyOut;
+    const pctChange = openingForPeriod > 0 ? (net / openingForPeriod) * 100 : null;
+    // Dues are scoped to the selected period exactly as actual rows are —
+    // "August" must not spill next year's schedule into August's timeline.
+    const projectedInRange = projected.filter(t => t.date >= start && t.date <= end);
+    const expected = projectedInRange.reduce((s, t) => s + t.inflow, 0);
 
-    // Ledger (newest first), respecting the direction filter.
-    const ledger = [...inRange, ...projected]
+    // ── Ledger (newest first) after the direction / category / name filters ──
+    const q = cfSearch.trim().toLowerCase();
+    const ledger = [...inRange, ...projectedInRange]
       .filter(t => cfDir === "all" ? true : cfDir === "in" ? t.inflow > 0 : t.outflow > 0)
-      .sort((a, b) => b.seq - a.seq); // newest-applied first → running balance reads top-to-bottom
+      .filter(t => cfGroup === "all" ? true : txnMeta(t.kind).group === cfGroup)
+      .filter(t => !q || (t.borrower || "").toLowerCase().includes(q) || (t.ref || "").toLowerCase().includes(q) || (t.note || "").toLowerCase().includes(q))
+      .sort((a, b) => b.order - a.order); // newest first → the balance column reads top-to-bottom
 
-    // Monthly buckets for the charts.
-    const mMap = {};
-    [...inRange, ...projected].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).forEach(t => {
-      const key = t.date.slice(0, 7);
-      if (!mMap[key]) mMap[key] = { key, label: monthLabel(key), inflow: 0, outflow: 0, projIn: 0, netBalance: t.balance, projected: key > curMonth };
-      if (t.projected) mMap[key].projIn += t.inflow;
-      else { mMap[key].inflow += t.inflow; mMap[key].outflow += t.outflow; }
-      mMap[key].netBalance = t.balance;
+    // Group the ledger by day so the timeline reads Today / Yesterday / date.
+    // Keyed by date, not by adjacency: one date must only ever produce one
+    // section, or React sees two siblings sharing a key.
+    const dayMap = new Map();
+    ledger.forEach(t => {
+      let d = dayMap.get(t.date);
+      if (!d) { d = { date: t.date, heading: dayHeading(t.date), rows: [] }; dayMap.set(t.date, d); }
+      d.rows.push(t);
     });
-    const months = Object.values(mMap).sort((a, b) => a.key < b.key ? -1 : 1);
+    const days = [...dayMap.values()].sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+    // Actual cash and expected dues are totalled apart: a day's net must never
+    // fold in money that hasn't arrived.
+    days.forEach(d => {
+      d.net = d.rows.filter(t => !t.projected).reduce((s, t) => s + t.inflow - t.outflow, 0);
+      d.expected = d.rows.filter(t => t.projected).reduce((s, t) => s + t.inflow, 0);
+      d.hasActual = d.rows.some(t => !t.projected);
+    });
+
+    // ── Chart buckets. Same rows, three groupings — day, week, or month. ──
+    const events = [...inRange, ...projectedInRange].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    const bucket = t => {
+      if (cfAgg === "monthly" || cfAllTime) return { key: t.date.slice(0, 7), label: monthLabelShort(t.date.slice(0, 7)) };
+      if (cfAgg === "daily") return { key: t.date, label: String(Number(t.date.slice(8, 10))) };
+      const w = Math.min(3, Math.floor((Number(t.date.slice(8, 10)) - 1) / 7));  // a 5th part-week folds into week 4
+      return { key: `${t.date.slice(0, 7)}-W${w}`, label: `W${w + 1}` };
+    };
+    const bMap = {};
+    events.forEach(t => {
+      const b = bucket(t);
+      if (!bMap[b.key]) bMap[b.key] = { key: b.key, label: b.label, inflow: 0, outflow: 0, projIn: 0, projected: t.date.slice(0, 7) > curMonth };
+      if (t.projected) bMap[b.key].projIn += t.inflow;
+      else { bMap[b.key].inflow += t.inflow; bMap[b.key].outflow += t.outflow; }
+    });
+    const buckets = Object.values(bMap).sort((a, b) => a.key < b.key ? -1 : 1);
 
     // Date-keyed running balance for the Net Cash Position baseline chart.
     // Collapse multiple events on the same day to that day's closing balance so
     // each x-axis date carries one value (BaselineSeries needs unique ascending times).
-    const hist = [...inRange, ...projected].sort((a, b) => a.seq - b.seq);
+    const hist = [...inRange, ...projectedInRange].sort((a, b) => a.order - b.order);
     const posMap = new Map();
     hist.forEach(t => posMap.set(t.date, { time: t.date, value: t.balance, projected: !!t.projected }));
     const position = [...posMap.values()].sort((a, b) => a.time < b.time ? -1 : 1);
 
-    return { collected, disbursed, net, interest, expected, expectedCount: projected.length, ledger, months, position, opening, balance: bal };
-  }, [db.loans, db.payments, db.transactions, db.settings, cfRange, cfDir, cfProjected]);
+    // ── Where money sits right now (never mixed into available cash) ──
+    let loanedOut = 0, outstandingPrincipal = 0, expectedCollections = 0, activeLoans = 0;
+    db.loans.forEach(l => {
+      const st = computeStatus(l, db.payments);
+      if (st.overallStatus === "FULLY PAID") return;
+      activeLoans++;
+      loanedOut += Number(l.amount) || 0;
+      outstandingPrincipal += Math.max(0, (Number(l.amount) || 0) - principalRecovered(st));
+      expectedCollections += st.grandLeft;
+    });
+
+    // Months that actually carry activity — powers "jump to a month with data".
+    const activeMonths = [...new Set(actual.map(t => t.date.slice(0, 7)))].sort();
+
+    return {
+      start, end, opening, openingForPeriod, balance: bal,
+      collected, collectedCount, disbursed, releasedCount,
+      moneyIn, moneyOut, net, pctChange, interest, principalIn,
+      feeIncome, capitalIn, otherIn, withdrawals, expenses, otherOut,
+      expected, expectedCount: projectedInRange.length,
+      ledger, days, buckets, position,
+      loanedOut, outstandingPrincipal, expectedCollections, activeLoans,
+      hasAnyActivity: actual.length > 0, inRangeCount: inRange.length, activeMonths,
+    };
+  }, [db.loans, db.payments, db.transactions, db.settings, cfMonth, cfAllTime, cfAgg, cfDir, cfGroup, cfSearch, cfProjected]);
+
+  // Every unpaid installment, earliest first. Overdue keeps its real due date
+  // here, unlike the projected ledger rows which clamp to today so the running
+  // balance stays chronological.
+  const upcoming = useMemo(() => {
+    const todayStr = isoDay(new Date());
+    const items = [];
+    db.loans.forEach(l => {
+      const st = computeStatus(l, db.payments);
+      if (st.overallStatus === "FULLY PAID") return;
+      st.rows.forEach((r, i) => {
+        if (r.amtLeft <= 0.005) return;
+        items.push({ key: `${l.id}-${i}`, loanId: l.id, ref: l.ref, borrower: l.borrower,
+          dueStr: isoDay(r.due), amount: r.amtLeft });
+      });
+    });
+    items.sort((a, b) => a.dueStr < b.dueStr ? -1 : a.dueStr > b.dueStr ? 1 : 0);
+    const overdue = items.filter(i => i.dueStr < todayStr);
+    return { items, overdue, overdueAmt: overdue.reduce((s, i) => s + i.amount, 0), todayStr };
+  }, [db.loans, db.payments]);
+
+  // Cash forecast to a date the lender chooses. Every term is real data — cash
+  // on hand, unpaid installments falling due inside the window, and loans
+  // already queued for release. Nothing here is modelled or invented.
+  const forecast = useMemo(() => {
+    const horizon = cfForecastDate > upcoming.todayStr ? cfForecastDate : upcoming.todayStr;
+    const due = upcoming.items.filter(i => i.dueStr >= upcoming.todayStr && i.dueStr <= horizon);
+    const scheduled = (db.queue || []).filter(q => q.status !== "funded" && q.date <= horizon);
+    const collections = due.reduce((s, i) => s + i.amount, 0);
+    const releases = scheduled.reduce((s, q) => s + (Number(q.amount) || 0), 0);
+    return {
+      horizon,
+      days: Math.round((parseDate(horizon) - parseDate(upcoming.todayStr)) / 86400000),
+      cash: cashflow.balance,
+      collections, collectionCount: due.length,
+      releases, releaseCount: scheduled.length,
+      projected: cashflow.balance + collections - releases,
+      overdueAmt: upcoming.overdueAmt, overdueCount: upcoming.overdue.length,
+    };
+  }, [cashflow.balance, upcoming, db.queue, cfForecastDate]);
+
+  // ── Cash-flow view derivations (cheap, read straight by the markup) ──
+  const todayISO = isoDay(new Date());
+  const thisMonth = todayISO.slice(0, 7);
+  const periodIsPast = !cfAllTime && cashflow.end < todayISO;
+  const latestActiveMonth = cashflow.activeMonths.length ? cashflow.activeMonths[cashflow.activeMonths.length - 1] : null;
+  // Share of the released/collected bar. 50/50 when nothing moved, so the bar
+  // never implies a lopsided period that didn't happen.
+  const lendSplit = (cashflow.collected + cashflow.disbursed) > 0
+    ? (cashflow.collected / (cashflow.collected + cashflow.disbursed)) * 100 : 50;
+  const lendVerdict = (() => {
+    const diff = cashflow.collected - cashflow.disbursed;
+    const period = cfAllTime ? "so far" : `in ${monthLabelLong(cfMonth)}`;
+    if (cashflow.collected === 0 && cashflow.disbursed === 0) return `No loans released or collected ${period}.`;
+    if (Math.abs(diff) < 0.01) return `Collections exactly matched releases ${period}.`;
+    return diff > 0
+      ? `You collected ${fmt(diff)} more than you released ${period}.`
+      : `You released ${fmt(-diff)} more than you collected ${period}.`;
+  })();
+  const heroCls = (() => { const n = fmt(cashflow.balance).length; return n <= 11 ? "text-[2.25rem]" : n <= 13 ? "text-3xl" : "text-2xl"; })();
+  const cfFilterCount = (cfDir !== "all" ? 1 : 0) + (cfGroup !== "all" ? 1 : 0) + (cfSearch.trim() ? 1 : 0);
+  const cfChips = [
+    cfDir !== "all" && [cfDir === "in" ? "Money in" : "Money out", () => setCfDir("all")],
+    cfGroup !== "all" && [(CF_GROUPS.find(g => g[0] === cfGroup) || [, cfGroup])[1], () => setCfGroup("all")],
+    cfSearch.trim() && [`\u201c${cfSearch.trim()}\u201d`, () => setCfSearch("")],
+  ].filter(Boolean);
+  const clearCfFilters = () => { setCfDir("all"); setCfGroup("all"); setCfSearch(""); };
 
   // Borrower queue, ordered earliest-first. Walk the line and mark each entry
   // "ready to fund" while the cumulative requested amount still fits cash on hand.
@@ -1884,7 +2187,7 @@ function App() {
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `cash-flow-${cfRange}.csv`;
+    a.href = url; a.download = `cash-flow-${cfAllTime ? "all-time" : cfMonth}.csv`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     flash("Exported CSV");
@@ -2632,134 +2935,399 @@ function App() {
         </>)}
 
         {/* ── CASH FLOW ── */}
-        {tab === "cashflow" && (<>
-          <div className="bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
-            <p className="font-semibold text-slate-800">Cash Flow</p>
-            <div className="flex gap-1 p-1 bg-slate-100 rounded-xl">
-              {[["all", "All"], ["month", "This Month"], ["30d", "30 Days"], ["year", "This Year"]].map(([k, lbl]) => (
-                <button key={k} onClick={() => setCfRange(k)} className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition ${cfRange === k ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500"}`}>{lbl}</button>
-              ))}
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-slate-500 flex-1">Opening Balance</label>
-              <input type="number" inputMode="decimal" value={openingInput} onChange={e => setOpeningInput(e.target.value)} onBlur={commitOpening} placeholder="0.00" className="w-32 px-3 py-2 rounded-xl border border-slate-200 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 outline-none text-sm text-right text-slate-800 bg-white" />
-            </div>
-            <button onClick={() => setCfProjected(v => !v)} className={`w-full py-2.5 rounded-xl text-xs font-semibold transition ${cfProjected ? "bg-emerald-600 text-white shadow-sm" : "bg-slate-100 text-slate-500 active:bg-slate-200"}`}>{cfProjected ? "✓ Showing projected dues" : "Show projected dues"}</button>
-            {cfProjected && <p className="text-xs text-slate-400">Expected upcoming: <span className="font-semibold text-emerald-700">{fmt(cashflow.expected)}</span> across {cashflow.expectedCount} due{cashflow.expectedCount !== 1 ? "s" : ""}.</p>}
-          </div>
+        {tab === "cashflow" && (
+          <div className="mx-auto w-full max-w-6xl space-y-4">
 
-          <div className="grid grid-cols-2 gap-3">
-            <Stat label="Total Collected" value={fmt(cashflow.collected)} tone="emerald" />
-            <Stat label="Capital Disbursed" value={fmt(cashflow.disbursed)} tone="amber" />
-            <Stat label="Net Cash Flow" value={fmt(cashflow.net)} tone={cashflow.net >= 0 ? "teal" : "red"} />
-            <Stat label="Interest Earned" value={fmt(cashflow.interest)} tone="emerald" />
-          </div>
-
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-              <p className="font-semibold text-slate-800">Inflow vs Outflow</p>
-              <div className="flex gap-3 text-xs text-slate-500">
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#10b981" }} />In</span>
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#fbbf24" }} />Out</span>
-              </div>
-            </div>
-            <MiniBars data={cashflow.months} fmt={fmt} />
-          </div>
-
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-              <p className="font-semibold text-slate-800">Net Cash Position</p>
-              <span className={`font-bold text-sm ${cashflow.balance < 0 ? "text-red-600" : "text-emerald-700"}`}>{fmt(cashflow.balance)}</span>
-            </div>
-            {cashflow.position.length
-              ? <PositionChart data={cashflow.position} fmt={fmt} baseline={cashflow.opening} />
-              : <div className="p-6 text-center text-slate-400 text-sm">No data to chart.</div>}
-          </div>
-
-          <div className="bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
-            <p className="font-semibold text-slate-800">Other Cash Entries</p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className={labelCls}>Category</label>
-                <select className={inputCls} value={txCat} onChange={e => setTxCat(e.target.value)}>
-                  {TX_TYPES.map(([k]) => <option key={k}>{k}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className={labelCls}>Amount</label>
-                <input type="number" inputMode="decimal" className={inputCls} value={txAmount} onChange={e => setTxAmount(e.target.value)} placeholder="0.00" />
-              </div>
-              <div>
-                <label className={labelCls}>Date</label>
-                <input type="date" className={inputCls} value={txDate} onChange={e => setTxDate(e.target.value)} />
-              </div>
-              <div>
-                <label className={labelCls}>Note</label>
-                <input className={inputCls} value={txNote} onChange={e => setTxNote(e.target.value)} placeholder="Optional" />
-              </div>
-            </div>
-            <p className="text-xs text-slate-400">{txDir(txCat) === "in" ? "↑ Adds to cash (inflow)" : "↓ Reduces cash (outflow)"}</p>
-            <button onClick={addTransaction} className="w-full py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Add Entry</button>
-            {(db.transactions || []).filter(t => { const [s, e] = rangeBounds(cfRange); return t.date >= s && t.date <= e; }).sort((a, b) => a.date < b.date ? 1 : -1).map(t => (
-              <div key={t.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-xs">
+            {/* ── Period header ── title + month stepper. The month is what a
+                lender reconciles, so it is the primary control, not a preset. */}
+            <div className={`${cardCls} p-4 space-y-3`}>
+              <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <span className={`font-semibold ${t.direction === "in" ? "text-emerald-700" : "text-amber-700"}`}>{t.direction === "in" ? "+" : "−"}{fmt(t.amount)}</span>
-                  <span className="text-slate-500"> · {t.kind}{t.note ? ` · ${t.note}` : ""}</span>
+                  <p className="text-lg font-bold text-slate-800 leading-tight">Cash Flow</p>
+                  <p className="text-xs text-slate-400 mt-0.5">{cfAllTime ? "Every movement on record" : `${fmtDate(parseDate(cashflow.start))} – ${fmtDate(parseDate(cashflow.end))}`}</p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {t.pending && <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold">Queued</span>}
-                  <span className="text-slate-400">{fmtDate(parseDate(t.date))}</span>
-                  <button onClick={() => deleteTransaction(t)} className="text-red-400 text-base leading-none">×</button>
+                <button onClick={() => { buzz(); setCfAllTime(v => !v); }} aria-pressed={cfAllTime}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition shrink-0 border ${
+                    cfAllTime ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-slate-100 text-slate-500 active:bg-slate-100"}`}>All time</button>
+              </div>
+              {!cfAllTime && (
+                <div className="flex items-center gap-2">
+                  <button onClick={() => { buzz(); setCfMonth(m => shiftMonth(m, -1)); }} aria-label="Previous month"
+                    className="w-11 h-11 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center active:bg-slate-200 transition shrink-0">
+                    <i data-lucide="chevron-left" className="w-5 h-5"></i>
+                  </button>
+                  <button onClick={() => { if (cfMonth !== thisMonth) { buzz(); setCfMonth(thisMonth); } }}
+                    disabled={cfMonth === thisMonth}
+                    className="flex-1 min-w-0 h-11 rounded-xl flex flex-col items-center justify-center disabled:opacity-100 active:bg-slate-50 transition">
+                    <span className="font-semibold text-slate-800 text-sm truncate">{monthLabelLong(cfMonth)}</span>
+                    {cfMonth !== thisMonth && <span className="text-[10px] text-emerald-600 font-medium leading-none mt-0.5">Tap for this month</span>}
+                  </button>
+                  <button onClick={() => { buzz(); setCfMonth(m => shiftMonth(m, 1)); }} aria-label="Next month"
+                    className="w-11 h-11 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center active:bg-slate-200 transition shrink-0">
+                    <i data-lucide="chevron-right" className="w-5 h-5"></i>
+                  </button>
                 </div>
-              </div>
-            ))}
-          </div>
-
-             {/* ── LEDGER ── */}
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-
-            <div className="px-4 py-3 border-b border-slate-50 flex items-center justify-between">
-              <p className="font-semibold text-slate-800">Ledger</p>
-              {cashflow.ledger.length > 0 && <button onClick={exportCsv} className="px-3 py-1.5 rounded-lg border border-slate-100 text-slate-500 text-xs font-semibold active:bg-slate-100 transition">⬇ CSV</button>}
-            </div>
-            <div className="px-4 pt-3">
-              <div className="flex gap-1 p-1 bg-slate-100 rounded-xl">
-                {[["all", "All"], ["in", "Inflow"], ["out", "Outflow"]].map(([k, lbl]) => (
-                  <button key={k} onClick={() => setCfDir(k)} className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition ${cfDir === k ? "bg-white text-slate-800 shadow-sm" : "text-slate-500"}`}>{lbl}</button>
-                ))}
-              </div>
+              )}
             </div>
 
-            {cashflow.ledger.length === 0 ? (
-              <div className="p-8 text-center text-slate-400 text-sm">No cash flow activity in this range.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead><tr className="bg-slate-100 text-slate-500">
-                    {["Date", "Details", "In", "Out", "Balance"].map(h => <th key={h} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}
-                  </tr></thead>
-                  <tbody>
-                    {cashflow.ledger.map(t => (
-                      <tr key={t.id} onClick={() => { if (t.ref) { setLoanIdOvr(t.ref); setSelBorrower(""); setTab("status"); } }} className={`border-t border-slate-100 ${t.loanId ? "active:bg-slate-50 cursor-pointer" : ""} ${t.projected ? "opacity-60" : ""}`}>
-                        <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(parseDate(t.date))}</td>
-                        <td className="px-3 py-2">
-                          <div className="font-medium text-slate-700 flex items-center gap-1">
-                            {t.kind}{t.kind === "Collection" && t.subtype ? ` · ${t.subtype}` : ""}
-                            {t.projected && <span className="px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-500 text-[10px] font-semibold">Projected</span>}
-                          </div>
-                          <div className="text-slate-400">{t.loanId ? `${t.ref || ""} · ${t.borrower}` : (t.note || "Manual entry")}</div>
-                        </td>
-                        <td className="px-3 py-2 text-emerald-700 whitespace-nowrap">{t.inflow ? fmt(t.inflow) : "—"}</td>
-                        <td className="px-3 py-2 text-amber-700 whitespace-nowrap">{t.outflow ? fmt(t.outflow) : "—"}</td>
-                        <td className={`px-3 py-2 font-semibold whitespace-nowrap ${t.balance < 0 ? "text-red-600" : "text-slate-700"}`}>{fmt(t.balance)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {/* Stale-data notice — the snapshot is already painted, so say what
+                is on screen rather than replacing it with an error. */}
+            {loadError && cashflow.hasAnyActivity && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2.5">
+                <i data-lucide="wifi-off" className="w-4 h-4 text-amber-700 mt-0.5 shrink-0"></i>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-amber-800">Showing your last synced figures</p>
+                  <p className="text-xs text-amber-700 mt-0.5">We couldn&rsquo;t reach the server, so newer entries may be missing.</p>
+                </div>
+                <button onClick={() => refresh().then(() => setLoadError(false)).catch(() => flash("Still can't reach the server."))}
+                  className="px-2.5 py-1 rounded-lg bg-amber-600 text-white text-[11px] font-semibold active:bg-amber-700 transition shrink-0">Retry</button>
               </div>
             )}
+
+            {loading ? <CashFlowSkeleton />
+            : loadError && !cashflow.hasAnyActivity ? (
+              <div className={cardCls}>
+                <EmptyPanel icon="wifi-off" title="We couldn't load your cash flow"
+                  body="Check your connection and try again. Nothing you've entered has been lost."
+                  action="Try again" onAction={() => refresh().then(() => setLoadError(false)).catch(() => flash("Still can't reach the server."))} />
+              </div>
+            )
+            : !cashflow.hasAnyActivity ? (
+              <div className={cardCls}>
+                <EmptyPanel icon="trending-up" title="No cash flow yet"
+                  body="Your cash movements from loan releases and collections will appear here. You can also record capital, fees and expenses by hand."
+                  action="Record a cash entry" onAction={() => setCfEntryOpen(true)} />
+              </div>
+            ) : (
+
+            /* Mobile reads this top-to-bottom; on large screens the same cards
+               pair off into two columns instead of one long ribbon. */
+            <div className="space-y-4 md:space-y-0 md:grid md:grid-cols-12 md:gap-4 md:items-start">
+
+              {/* ── 1 · AVAILABLE CASH — the one number that dominates ── */}
+              <div className={`${cardCls} p-5 sm:p-6 md:col-span-6 lg:col-span-5`}>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Available Cash</p>
+                <p className={`mt-1.5 ${heroCls} leading-none font-bold tabular-nums ${cashflow.balance < 0 ? "text-red-600" : "text-slate-800"}`}>{fmt(cashflow.balance)}</p>
+                <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-bold tabular-nums ${
+                    cashflow.net >= 0 ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}>
+                    <i data-lucide={cashflow.net >= 0 ? "trending-up" : "trending-down"} className="w-3.5 h-3.5"></i>
+                    {cashflow.net >= 0 ? "+" : "−"}{fmt(Math.abs(cashflow.net))}
+                  </span>
+                  <span className="text-xs text-slate-400">{cfAllTime ? "all time" : `in ${monthLabelLong(cfMonth)}`}</span>
+                </div>
+                {cashflow.pctChange !== null && Math.abs(cashflow.pctChange) >= 0.05 && (
+                  <p className="mt-2 text-xs text-slate-400">
+                    {cashflow.pctChange >= 0 ? "↑" : "↓"} {Math.abs(cashflow.pctChange).toFixed(1)}% from {fmt(cashflow.openingForPeriod)} at the start of the period
+                  </p>
+                )}
+                {periodIsPast && (
+                  <p className="mt-2 text-xs text-slate-400">Cash at the close of {monthLabelLong(cfMonth)}: <span className="font-semibold text-slate-600 tabular-nums">{fmt(cashflow.openingForPeriod + cashflow.net)}</span></p>
+                )}
+                <div className="mt-4 pt-3.5 border-t border-slate-100 space-y-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <label htmlFor="cf-opening" className="min-w-0">
+                      <span className="block text-xs font-medium text-slate-500">Initial capital</span>
+                      <span className="block text-[11px] text-slate-400">Cash you held before these records</span>
+                    </label>
+                    <input id="cf-opening" type="number" inputMode="decimal" value={openingInput}
+                      onChange={e => setOpeningInput(e.target.value)} onBlur={commitOpening} placeholder="0.00"
+                      className="w-32 shrink-0 px-3 py-2 rounded-xl border border-slate-100 bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 outline-none text-sm text-right text-slate-800 transition" />
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">Money you can lend today. Cash already with borrowers is <span className="font-semibold text-slate-500">not</span> counted here.</p>
+                  {queueView.rows.length > 0 && (
+                    <button onClick={() => setTab("queue")} className="text-xs font-semibold text-emerald-600 active:opacity-70 flex items-center gap-1">
+                      {queueView.readyCount} of {queueView.rows.length} in the queue ready to fund
+                      <i data-lucide="chevron-right" className="w-3.5 h-3.5"></i>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* ── 2 · MONEY IN − MONEY OUT = NET ── */}
+              <div className={`${cardCls} p-4 space-y-3 md:col-span-6 lg:col-span-7`}>
+                <CardHead title="Cash flow summary" hint={cfAllTime ? "All recorded movements" : monthLabelLong(cfMonth)} />
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl bg-slate-50 p-3">
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      <i data-lucide="arrow-down-left" className="w-3.5 h-3.5 text-emerald-600"></i>Money In
+                    </p>
+                    <p className="mt-1 text-base sm:text-lg font-bold tabular-nums text-emerald-700 break-all">{fmt(cashflow.moneyIn)}</p>
+                    <div className="mt-2.5 space-y-1">
+                      <FlowLine label="Principal repaid" value={fmt(cashflow.principalIn)} muted={cashflow.principalIn <= 0} />
+                      <FlowLine label="Interest collected" value={fmt(cashflow.interest)} muted={cashflow.interest <= 0} />
+                      <FlowLine label="Fees & income" value={fmt(cashflow.feeIncome + cashflow.otherIn)} muted={cashflow.feeIncome + cashflow.otherIn <= 0} />
+                      <FlowLine label="Capital added" value={fmt(cashflow.capitalIn)} muted={cashflow.capitalIn <= 0} />
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 p-3">
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      <i data-lucide="arrow-up-right" className="w-3.5 h-3.5 text-amber-600"></i>Money Out
+                    </p>
+                    <p className="mt-1 text-base sm:text-lg font-bold tabular-nums text-amber-700 break-all">{fmt(cashflow.moneyOut)}</p>
+                    <div className="mt-2.5 space-y-1">
+                      <FlowLine label="Loans released" value={fmt(cashflow.disbursed)} muted={cashflow.disbursed <= 0} />
+                      <FlowLine label="Withdrawals" value={fmt(cashflow.withdrawals)} muted={cashflow.withdrawals <= 0} />
+                      <FlowLine label="Expenses" value={fmt(cashflow.expenses)} muted={cashflow.expenses <= 0} />
+                      <FlowLine label="Other" value={fmt(cashflow.otherOut)} muted={cashflow.otherOut <= 0} />
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 px-3.5 py-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Net Cash Flow</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5 tabular-nums truncate">{fmt(cashflow.moneyIn)} in − {fmt(cashflow.moneyOut)} out</p>
+                  </div>
+                  <p className={`text-xl sm:text-2xl font-bold tabular-nums shrink-0 ${cashflow.net >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                    {cashflow.net >= 0 ? "+" : "−"}{fmt(Math.abs(cashflow.net))}
+                  </p>
+                </div>
+              </div>
+
+              {/* ── 3 · LENDING ACTIVITY — released vs collected, then the money
+                     that is out with borrowers and is NOT available cash. ── */}
+              <div className={`${cardCls} p-4 space-y-3.5 md:col-span-6`}>
+                <CardHead title="Lending activity" hint={cfAllTime ? "All time" : monthLabelLong(cfMonth)} />
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl border border-slate-100 p-3">
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      <i data-lucide="arrow-up-right" className="w-3.5 h-3.5 text-amber-600"></i>Released
+                    </p>
+                    <p className="mt-1 text-base sm:text-lg font-bold tabular-nums text-slate-800 break-all">{fmt(cashflow.disbursed)}</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">{cashflow.releasedCount} loan{cashflow.releasedCount !== 1 ? "s" : ""} released</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 p-3">
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      <i data-lucide="arrow-down-left" className="w-3.5 h-3.5 text-emerald-600"></i>Collected
+                    </p>
+                    <p className="mt-1 text-base sm:text-lg font-bold tabular-nums text-slate-800 break-all">{fmt(cashflow.collected)}</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">{cashflow.collectedCount} payment{cashflow.collectedCount !== 1 ? "s" : ""} collected</p>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex h-2 rounded-full overflow-hidden bg-slate-100" role="img"
+                    aria-label={`Collected ${fmt(cashflow.collected)}, released ${fmt(cashflow.disbursed)}`}>
+                    <div className="bg-emerald-500" style={{ width: `${lendSplit}%` }} />
+                    <div className="bg-amber-400" style={{ width: `${100 - lendSplit}%` }} />
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500 leading-relaxed">{lendVerdict}</p>
+                </div>
+                <div className="pt-3 border-t border-slate-100">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Out with borrowers · not available cash</p>
+                  <div className="mt-1.5 divide-y divide-slate-100 lg:divide-y-0 lg:grid lg:grid-cols-3 lg:gap-3">
+                    {[
+                      ["Loaned out", fmt(cashflow.loanedOut), `${cashflow.activeLoans} active loan${cashflow.activeLoans !== 1 ? "s" : ""}`],
+                      ["Outstanding principal", fmt(cashflow.outstandingPrincipal), "capital still out"],
+                      ["Expected back", fmt(cashflow.expectedCollections), "with interest"],
+                    ].map(([label, value, hint]) => (
+                      <div key={label} className="flex items-baseline justify-between gap-2 py-2 lg:block lg:py-0">
+                        <p className="text-xs text-slate-500 lg:text-[11px] lg:text-slate-400">{label}</p>
+                        <p className="font-bold tabular-nums text-slate-800 text-sm lg:mt-0.5 lg:text-base">{value}</p>
+                        <p className="hidden lg:block text-[11px] text-slate-400">{hint}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── 4 · CASH FORECAST — only from data the app already holds ── */}
+              <div className={`${cardCls} p-4 space-y-3 md:col-span-6`}>
+                <CardHead title="Cash forecast" hint={forecast.days === 0 ? "As at today" : `Next ${forecast.days} day${forecast.days !== 1 ? "s" : ""}`} />
+                <div className="flex items-center gap-2">
+                  <label htmlFor="cf-horizon" className="text-xs font-medium text-slate-500 shrink-0">Forecast to</label>
+                  <input id="cf-horizon" type="date" value={cfForecastDate} min={todayISO}
+                    onChange={e => setCfForecastDate(e.target.value || todayISO)}
+                    className={`${inputCls} flex-1 min-w-0`} />
+                </div>
+                <div className="space-y-0.5">
+                  <div className="flex items-baseline justify-between gap-2 py-1.5">
+                    <span className="text-xs text-slate-500">Available cash now</span>
+                    <span className="text-sm font-semibold tabular-nums text-slate-800">{fmt(forecast.cash)}</span>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2 py-1.5">
+                    <span className="text-xs text-slate-500 min-w-0">
+                      <span className="text-emerald-600 font-semibold">+</span> Expected collections
+                      <span className="block text-[11px] text-slate-400">{forecast.collectionCount} installment{forecast.collectionCount !== 1 ? "s" : ""} falling due</span>
+                    </span>
+                    <span className="text-sm font-semibold tabular-nums text-emerald-700">{fmt(forecast.collections)}</span>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2 py-1.5">
+                    <span className="text-xs text-slate-500 min-w-0">
+                      <span className="text-amber-600 font-semibold">−</span> Scheduled releases
+                      <span className="block text-[11px] text-slate-400">{forecast.releaseCount ? `${forecast.releaseCount} queued borrower${forecast.releaseCount !== 1 ? "s" : ""}` : "nothing in the queue"}</span>
+                    </span>
+                    <span className="text-sm font-semibold tabular-nums text-amber-700">{fmt(forecast.releases)}</span>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2 pt-3 mt-1 border-t border-slate-100">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Projected cash</span>
+                    <span className={`text-xl font-bold tabular-nums ${forecast.projected < 0 ? "text-red-600" : "text-emerald-600"}`}>{fmt(forecast.projected)}</span>
+                  </div>
+                </div>
+                {forecast.overdueCount > 0 && (
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Excludes <span className="font-semibold text-amber-700">{fmt(forecast.overdueAmt)}</span> already overdue across {forecast.overdueCount} installment{forecast.overdueCount !== 1 ? "s" : ""}.
+                  </p>
+                )}
+                <p className="text-[11px] text-slate-400 leading-relaxed">Counts unpaid installments due on or before {fmtDate(parseDate(forecast.horizon))} and borrowers queued for release by then. Nothing here is estimated.</p>
+              </div>
+
+              {/* ── 5 · CASH IN vs CASH OUT ── */}
+              <div className={`${cardCls} overflow-hidden md:col-span-6 lg:col-span-7`}>
+                <div className="p-4 pb-3 space-y-3">
+                  <CardHead title="Cash in vs cash out" hint={cfAllTime ? "Monthly totals, all time" : `${cfAgg === "daily" ? "Daily" : cfAgg === "weekly" ? "Weekly" : "Monthly"} totals`}
+                    right={
+                      <div className="flex flex-col items-end gap-1 text-[11px] text-slate-400 shrink-0">
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#10b981" }} />In</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#f59e0b" }} />Out</span>
+                        {cfProjected && <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#6ee7b7" }} />Expected</span>}
+                      </div>
+                    } />
+                  {!cfAllTime && (
+                    <Segmented value={cfAgg} onChange={setCfAgg}
+                      options={[["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]]} />
+                  )}
+                </div>
+                <FlowChart data={cashflow.buckets} fmt={fmt} />
+                <p className="px-4 pb-3 text-[11px] text-slate-400">Bars above the line are cash coming in; below the line is cash going out.</p>
+              </div>
+
+              {/* ── 6 · CASH POSITION TREND ── */}
+              <div className={`${cardCls} overflow-hidden md:col-span-6 lg:col-span-5`}>
+                <div className="px-4 py-3 border-b border-slate-100">
+                  <CardHead title="Cash position trend"
+                    hint={cashflow.net >= 0 ? "Above the opening line means you are building cash" : "Below the opening line means cash is draining"}
+                    right={<span className={`font-bold text-sm tabular-nums shrink-0 ${cashflow.balance < 0 ? "text-red-600" : "text-emerald-700"}`}>{fmt(cashflow.balance)}</span>} />
+                </div>
+                {cashflow.position.length
+                  ? <PositionChart data={cashflow.position} fmt={fmt} baseline={cashflow.opening} />
+                  : <EmptyPanel icon="trending-up" title="No trend yet" body="Once this period has cash movements, the running balance will plot here." />}
+              </div>
+
+              {/* ── 7 · CASH MOVEMENTS TIMELINE ── */}
+              {/* No overflow-hidden here: it would become the scroll container
+                  for the sticky day headings and pin them in place. */}
+              <div className={`${cardCls} md:col-span-12`}>
+                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-800 text-sm">Cash movements</p>
+                    <p className="text-xs text-slate-400 truncate">{cashflow.ledger.length} entr{cashflow.ledger.length === 1 ? "y" : "ies"} · {cfAllTime ? "all time" : monthLabelLong(cfMonth)}</p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button onClick={() => setCfFilterOpen(true)}
+                      className="h-9 px-3 rounded-lg border border-slate-100 text-slate-500 text-xs font-semibold active:bg-slate-100 transition flex items-center gap-1.5">
+                      <i data-lucide="sliders-horizontal" className="w-3.5 h-3.5"></i>Filter
+                      {cfFilterCount > 0 && <span className="w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center">{cfFilterCount}</span>}
+                    </button>
+                    {cashflow.ledger.length > 0 && (
+                      <button onClick={exportCsv} aria-label="Export CSV" title="Export CSV"
+                        className="w-9 h-9 rounded-lg border border-slate-100 text-slate-500 flex items-center justify-center active:bg-slate-100 transition">
+                        <i data-lucide="download" className="w-4 h-4"></i>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="px-4 py-2.5 border-b border-slate-50">
+                  <button onClick={() => setCfProjected(v => !v)} aria-pressed={cfProjected}
+                    className={`w-full py-2.5 rounded-xl text-xs font-semibold transition ${
+                      cfProjected ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-500 active:bg-slate-200"}`}>
+                    {cfProjected ? "✓ Showing projected" : "Show projected"}
+                  </button>
+                  {cfProjected && (
+                    <p className="mt-2 text-[11px] text-slate-400 leading-relaxed">
+                      Greyed rows are unpaid installments still to be collected — <span className="font-semibold text-slate-500">{fmt(cashflow.expected)}</span> across {cashflow.expectedCount} due{cashflow.expectedCount !== 1 ? "s" : ""} in {cfAllTime ? "your records" : monthLabelLong(cfMonth)}. Their running balance is a projection, not cash you hold.
+                    </p>
+                  )}
+                </div>
+
+                {cfFilterCount > 0 && (
+                  <div className="px-4 py-2 border-b border-slate-50 flex flex-wrap items-center gap-1.5">
+                    {cfChips.map(([label, clear]) => (
+                      <button key={label} onClick={clear}
+                        className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium active:bg-slate-200 transition">
+                        {label}<span className="text-slate-400 text-sm leading-none">×</span>
+                      </button>
+                    ))}
+                    <button onClick={clearCfFilters} className="text-[11px] font-semibold text-emerald-600 px-1.5 py-1">Clear all</button>
+                  </div>
+                )}
+
+                {cashflow.days.length === 0 ? (
+                  <EmptyPanel icon="inbox"
+                    title={cfFilterCount > 0 ? "No movements match these filters" : `No cash movement in ${cfAllTime ? "your records" : monthLabelLong(cfMonth)}`}
+                    body={cfFilterCount > 0 ? "Try widening the filters to see the rest of this period."
+                      : "Loan releases, collections and manual entries dated in this period will be listed here."}
+                    action={cfFilterCount > 0 ? "Clear filters" : (latestActiveMonth && latestActiveMonth !== cfMonth ? `Go to ${monthLabelLong(latestActiveMonth)}` : "Record a cash entry")}
+                    onAction={() => { if (cfFilterCount > 0) clearCfFilters(); else if (latestActiveMonth && latestActiveMonth !== cfMonth) setCfMonth(latestActiveMonth); else setCfEntryOpen(true); }} />
+                ) : (
+                  <div>
+                    {cashflow.days.map(day => (
+                      <section key={day.date}>
+                        <div className="sticky top-0 z-[1] px-4 py-1.5 bg-slate-50 border-y border-slate-100 flex items-center justify-between">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{day.heading}</p>
+                          <p className="text-[11px] font-semibold tabular-nums flex items-center gap-1.5">
+                            {day.hasActual && <span className={day.net >= 0 ? "text-emerald-600" : "text-amber-600"}>{day.net >= 0 ? "+" : "−"}{fmt(Math.abs(day.net))}</span>}
+                            {day.expected > 0 && <span className="text-slate-400 font-medium">+{fmt(day.expected)} expected</span>}
+                          </p>
+                        </div>
+                        <ul className="divide-y divide-slate-50">
+                          {day.rows.map(t => {
+                            const meta = txnMeta(t.kind);
+                            const isIn = t.inflow > 0;
+                            return (
+                              <li key={t.id}>
+                                <div onClick={() => { if (t.ref) { setLoanIdOvr(t.ref); setSelBorrower(""); setTab("status"); } }}
+                                  className={`px-4 py-2.5 flex items-center gap-3 ${t.ref ? "cursor-pointer active:bg-slate-50" : ""} transition`}>
+                                  <span className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
+                                    t.projected ? "bg-slate-100 text-slate-400" : isIn ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}>
+                                    <i data-lucide={meta.icon} className="w-4 h-4"></i>
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <p className={`text-sm font-medium truncate ${t.projected ? "text-slate-500" : "text-slate-800"}`}>{t.borrower || meta.label}</p>
+                                    <p className="text-[11px] text-slate-400 truncate">
+                                      {t.projected && <span className="mr-1 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-semibold">Expected</span>}
+                                      {t.pending && <span className="mr-1 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold">Queued</span>}
+                                      {t.borrower ? meta.label : (t.note || t.kind)}
+                                      {t.ref ? ` · ${t.ref}` : ""}
+                                      {t.borrower && t.note ? ` · ${t.note}` : ""}
+                                    </p>
+                                  </div>
+                                  <div className="text-right shrink-0">
+                                    <p className={`text-sm font-bold tabular-nums ${
+                                      t.projected ? "text-slate-400" : isIn ? "text-emerald-700" : "text-amber-700"}`}>
+                                      {isIn ? "+" : "−"}{fmt(isIn ? t.inflow : t.outflow)}
+                                    </p>
+                                    <p className={`text-[10px] tabular-nums ${t.projected ? "text-slate-300" : "text-slate-400"}`}>bal {fmt(t.balance)}</p>
+                                  </div>
+                                  {t.txId && (
+                                    <button onClick={e => { e.stopPropagation(); if (confirm("Delete this cash entry?")) deleteTransaction({ id: t.txId, pending: t.pending }); }}
+                                      aria-label="Delete entry"
+                                      className="w-8 h-8 -mr-1.5 shrink-0 rounded-full text-slate-300 flex items-center justify-center active:bg-slate-100 active:text-red-500 transition">
+                                      <i data-lucide="trash-2" className="w-3.5 h-3.5"></i>
+                                    </button>
+                                  )}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </section>
+                    ))}
+                  </div>
+                )}
+
+                <div className="p-3 border-t border-slate-100">
+                  <button onClick={() => setCfEntryOpen(true)}
+                    className="w-full py-2.5 rounded-xl border border-dashed border-slate-200 text-slate-500 text-xs font-semibold active:bg-slate-50 transition flex items-center justify-center gap-1.5">
+                    <i data-lucide="plus" className="w-4 h-4"></i>Record a cash entry
+                  </button>
+                </div>
+              </div>
+
+            </div>
+            )}
           </div>
-        </>)}
+        )}
 
         {/* ── BORROWER QUEUE ── */}
         {tab === "queue" && (<>
@@ -3165,6 +3733,115 @@ function App() {
                     className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold disabled:opacity-40 transition">Apply revision</button>
                 </div>
               </>)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Cash-flow filters ── a bottom sheet on phones, a centred dialog on
+          desktop. Same shell as the loan action sheet below. */}
+      {cfFilterOpen && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={() => setCfFilterOpen(false)}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Filter cash movements"
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[88vh] overflow-y-auto overscroll-contain scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-semibold text-slate-800">Filter movements</p>
+                <button onClick={() => setCfFilterOpen(false)} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              <div>
+                <label className={labelCls}>Direction</label>
+                <Segmented value={cfDir} onChange={setCfDir} size="md"
+                  options={[["all", "All"], ["in", "Money in"], ["out", "Money out"]]} />
+              </div>
+              <div>
+                <label className={labelCls}>Category</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {CF_GROUPS.map(([k, lbl]) => (
+                    <button key={k} onClick={() => setCfGroup(k)} aria-pressed={cfGroup === k}
+                      className={`px-3 py-2.5 rounded-xl text-xs font-semibold text-left transition border ${
+                        cfGroup === k ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-100 text-slate-500 active:bg-slate-50"}`}>{lbl}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Borrower, loan ref or note</label>
+                <input className={inputCls} value={cfSearch} onChange={e => setCfSearch(e.target.value)} placeholder="e.g. Juan or OL-0001" />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button onClick={clearCfFilters} disabled={cfFilterCount === 0}
+                  className="flex-1 py-3 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold disabled:opacity-40 active:bg-slate-100 transition">Reset</button>
+                <button onClick={() => setCfFilterOpen(false)}
+                  className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">
+                  Show {cashflow.ledger.length} entr{cashflow.ledger.length === 1 ? "y" : "ies"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Cash entry ── the manual in/out form, plus the opening balance that
+          the whole running position is built on. */}
+      {cfEntryOpen && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={() => setCfEntryOpen(false)}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Record a cash entry"
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[88vh] overflow-y-auto overscroll-contain scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800">Record a cash entry</p>
+                  <p className="text-xs text-slate-400">Capital, fees, withdrawals and expenses</p>
+                </div>
+                <button onClick={() => setCfEntryOpen(false)} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className={labelCls}>Category</label>
+                  <select className={inputCls} value={txCat} onChange={e => setTxCat(e.target.value)}>
+                    {TX_TYPES.map(([k]) => <option key={k}>{k}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Amount</label>
+                  <input type="number" inputMode="decimal" className={inputCls} value={txAmount} onChange={e => setTxAmount(e.target.value)} placeholder="0.00" />
+                </div>
+                <div>
+                  <label className={labelCls}>Date</label>
+                  <input type="date" className={inputCls} value={txDate} onChange={e => setTxDate(e.target.value)} />
+                </div>
+                <div className="col-span-2">
+                  <label className={labelCls}>Note</label>
+                  <input className={inputCls} value={txNote} onChange={e => setTxNote(e.target.value)} placeholder="Optional" />
+                </div>
+              </div>
+              <p className={`flex items-center gap-1.5 text-xs font-medium ${txDir(txCat) === "in" ? "text-emerald-600" : "text-amber-600"}`}>
+                <i data-lucide={txDir(txCat) === "in" ? "arrow-down-left" : "arrow-up-right"} className="w-3.5 h-3.5"></i>
+                {txDir(txCat) === "in" ? "Adds to your available cash" : "Reduces your available cash"}
+              </p>
+              <button onClick={() => { addTransaction(); setCfEntryOpen(false); }}
+                className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">Add entry</button>
+
+              <div className="pt-4 mt-1 border-t border-slate-100">
+                <label className={labelCls}>Initial capital</label>
+                <div className="flex items-center gap-2">
+                  <input type="number" inputMode="decimal" value={openingInput} onChange={e => setOpeningInput(e.target.value)} onBlur={commitOpening}
+                    placeholder="0.00" className={`${inputCls} text-right`} />
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">Cash you already held before any of these records. Every balance on this screen is counted up from here.</p>
+              </div>
             </div>
           </div>
         </div>
