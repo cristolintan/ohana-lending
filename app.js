@@ -822,6 +822,27 @@ function IdPhotoButton({ image, onUpload, onRemove }) {
   );
 }
 
+// ─── Bottom-sheet row ─────────────────────────────────────────────────────────
+// One tappable action inside a sheet: icon chip, label, optional hint, chevron.
+// min-h-[44px] keeps it a comfortable thumb target. Every Tailwind class here is
+// a literal string — the CDN build only generates classes it can see in source,
+// so an interpolated `bg-${tone}-50` would silently produce no styles.
+function SheetRow({ icon, label, hint, danger, disabled, onClick }) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled}
+      className={`w-full min-h-[44px] flex items-center gap-3 px-2 py-2.5 rounded-xl text-left transition ${disabled ? "opacity-60" : "active:bg-slate-50"}`}>
+      <span className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${danger ? "bg-red-50 text-red-500" : "bg-slate-100 text-slate-500"}`}>
+        <i data-lucide={icon} className="w-4 h-4"></i>
+      </span>
+      <span className="flex-1 min-w-0">
+        <span className={`block text-sm font-semibold ${danger ? "text-red-600" : disabled ? "text-slate-400" : "text-slate-700"}`}>{label}</span>
+        {hint && <span className="block text-[11px] text-slate-400 leading-tight">{hint}</span>}
+      </span>
+      {!disabled && !danger && <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300 shrink-0"></i>}
+    </button>
+  );
+}
+
 // ─── Loan Agreement (fill-in form + signatures + printable document) ──────────
 function AgreementView({ loan, fmt, onBack, onSave }) {
   const [f, setF] = useState(() => ({
@@ -1119,6 +1140,10 @@ function App() {
   const [revFreq, setRevFreq] = useState("");
   const [revTerms, setRevTerms] = useState("");
   const [reviseOpen, setReviseOpen] = useState(false); // schedule revision lives in a modal
+  // Per-loan action sheet. Holds the id, never the loan object: saving an ID
+  // photo calls refresh(), which swaps db.loans for fresh objects — a captured
+  // object would keep painting the old idImage.
+  const [sheetLoanId, setSheetLoanId] = useState(null);
 
   // ── PWA state: connectivity, offline queue, install, update ──
   const [online, setOnline] = useState(() => navigator.onLine);
@@ -1322,6 +1347,14 @@ function App() {
   const calc = useMemo(() => computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }), [amount, terms, flatRate, frequency, startDate, dropRate]);
 
   const resetForm = () => { setEditId(null); setFundingQueueId(null); setName(""); setAmount(10000); setTerms(6); setFlatRate(3.6); setFrequency("Semi-Monthly"); setStartDate(today()); setDropRate(3.6); };
+
+  // A loan card is a link to its Payments screen.
+  const openPayments = l => {
+    setLoanIdOvr(l.ref || l.id);   // `resolved` matches on either
+    setSelBorrower("");
+    setSheetLoanId(null);
+    setTab("status");
+  };
 
   const exportSchedulePng = async () => {
     const el = document.getElementById("projected-export");
@@ -1985,6 +2018,22 @@ function App() {
   }, [reviseOpen]);
   useEffect(() => { setReviseOpen(false); }, [resolved.loan && resolved.loan.id]);
 
+  // The action sheet follows the live row, so an ID upload (which refreshes db)
+  // repaints it in place rather than closing it.
+  const sheetLoan = useMemo(() => db.loans.find(l => l.id === sheetLoanId) || null, [db.loans, sheetLoanId]);
+  const sheetStatus = useMemo(() => (sheetLoan ? computeStatus(sheetLoan, db.payments) : null), [sheetLoan, db.payments]);
+
+  // Close only when the loan is really gone (deleted), on tab change, or Escape.
+  // Deliberately NOT on every db change — that would eject the user mid-upload.
+  useEffect(() => { if (sheetLoanId && !sheetLoan) setSheetLoanId(null); }, [sheetLoanId, sheetLoan]);
+  useEffect(() => { setSheetLoanId(null); }, [tab]);
+  useEffect(() => {
+    if (!sheetLoanId) return;
+    const onKey = e => { if (e.key === "Escape") setSheetLoanId(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sheetLoanId]);
+
   const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
 
   // Reset scroll to top whenever the tab changes (better mobile flow)
@@ -2314,7 +2363,9 @@ function App() {
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="font-semibold text-slate-800">{db.loans.length} Loan{db.loans.length !== 1 ? "s" : ""}</p>
-              <button onClick={() => setTab("new")} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New</button>
+              {/* resetForm() matters: without it, tapping this right after an
+                  Edit reopens the form still bound to that loan. */}
+              <button onClick={() => { resetForm(); setTab("new"); }} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New</button>
             </div>
             {canImport && <button onClick={importLocal} className="w-full py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-xs font-semibold active:bg-amber-100 transition">⤓ Import {localBackup.loans.length} loan(s) saved on this device</button>}
             {db.loans.length > 0 && (
@@ -2344,48 +2395,60 @@ function App() {
             {db.loans.length === 0 && (
               <div className="bg-white rounded-2xl border border-slate-100 p-10 text-center space-y-3">
                 <p className="text-slate-400 text-sm">No loans yet.</p>
-                <button onClick={() => setTab("new")} className="px-4 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ Create your first loan</button>
+                <button onClick={() => { resetForm(); setTab("new"); }} className="px-4 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ Create your first loan</button>
               </div>
             )}
             {db.loans.length > 0 && filteredLoans.length === 0 && (
               <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">{recordSearch ? `No loans match “${recordSearch}”.` : `No ${recordFilter === "paid" ? "fully paid" : recordFilter === "active" ? "active" : ""} loans to show.`}</div>
             )}
+            {/* Two tap targets per card, always: the card itself opens Payments,
+                and ⋯ opens the loan's action sheet. Edit / Agreement / ID photo /
+                Delete used to sit inline here — four to eight buttons per row,
+                with Delete at the same weight as Edit. */}
             {filteredLoans.map(({ l, s }, i) => {
               const isOverdue = s.rows.some(r => r.status !== "PAID" && r.due < parseDate(today()));
+              const pct = s.totalLogged / ((Number(l.amount) + s.summedInterest) || 1);
               return (
-                <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-2 animate-fade-up">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-3 min-w-0">
+                <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className={`${cardCls} relative p-4 animate-fade-up`}>
+                  {/* Sibling of the primary button, never nested inside it. */}
+                  <button type="button" aria-haspopup="dialog" aria-label={`More actions for ${l.borrower}`}
+                    onClick={() => { buzz(8); setSheetLoanId(l.id); }}
+                    className="absolute right-1.5 top-1.5 h-11 w-11 rounded-full flex items-center justify-center text-slate-400 active:bg-slate-100 transition">
+                    <i data-lucide="more-vertical" className="w-5 h-5"></i>
+                  </button>
+
+                  <button type="button" onClick={() => openPayments(l)} className="w-full text-left space-y-2 rounded-xl active:opacity-60 transition">
+                    <div className="flex items-start gap-3 min-w-0 pr-10">
                       <Avatar name={l.borrower} />
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="text-xs text-emerald-600 font-semibold">{l.ref || l.id}</p>
                         <p className="font-bold truncate">{l.borrower}</p>
-                        <p className="text-xs text-slate-500">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
+                        <p className="text-xs text-slate-500 truncate">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
+                        {/* Chips carry the state the removed buttons used to imply. */}
+                        <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                          {isOverdue && <Badge s="OVERDUE" />}
+                          <Badge s={s.overallStatus} />
+                          {l.idImage && <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[11px] font-semibold">🪪 ID</span>}
+                          {l.freqChange && <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[11px] font-semibold">Revised</span>}
+                        </div>
                       </div>
                     </div>
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      {isOverdue && <Badge s="OVERDUE" />}
-                      <Badge s={s.overallStatus} />
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="bg-slate-50 rounded-lg p-2"><p className="text-slate-400">Amount</p><p className="font-bold">{fmt(l.amount)}</p></div>
+                      <div className="bg-emerald-50 rounded-lg p-2"><p className="text-slate-400">Paid</p><p className="font-bold text-emerald-700">{fmt(s.totalLogged)}</p></div>
+                      <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
                     </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs">
-                    <div className="bg-slate-50 rounded-lg p-2"><p className="text-slate-400">Amount</p><p className="font-bold">{fmt(l.amount)}</p></div>
-                    <div className="bg-emerald-50 rounded-lg p-2"><p className="text-slate-400">Paid</p><p className="font-bold text-emerald-700">{fmt(s.totalLogged)}</p></div>
-                    <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
-                  </div>
-                  {(() => { const pct = s.totalLogged / ((Number(l.amount) + s.summedInterest) || 1); return (
                     <div>
                       <div className="flex justify-between text-xs text-slate-400 mb-1"><span>Repaid</span><span className="tabular-nums">{Math.round(pct * 100)}%</span></div>
                       <ProgressBar pct={pct} tone={s.overallStatus === "FULLY PAID" ? "emerald" : isOverdue ? "red" : "emerald"} />
                     </div>
-                  ); })()}
-                  <div className="flex gap-2 pt-1">
-                    <button onClick={() => { setLoanIdOvr(l.ref); setSelBorrower(""); setTab("status"); }} className="flex-1 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">View Payments</button>
-                    {s.overallStatus !== "FULLY PAID" && <button onClick={() => editLoan(l)} className="px-4 py-2.5 rounded-xl border border-slate-200 active:bg-slate-100 text-slate-600 text-sm font-semibold transition">Edit</button>}
-                    <button onClick={() => deleteLoan(l.id, l.ref)} className="px-4 py-2.5 rounded-xl border border-red-200 active:bg-red-50 text-red-500 text-sm font-semibold transition">Delete</button>
-                  </div>
-                  <button onClick={() => { setAgreementLoanId(l.id); setTab("agreement"); }} className="w-full py-2.5 rounded-xl border border-emerald-300 active:bg-emerald-50 text-emerald-700 text-sm font-semibold transition">📄 Loan Agreement</button>
-                  <IdPhotoButton image={l.idImage} onUpload={d => saveIdImage(l, d)} onRemove={() => removeIdImage(l)} />
+                    {/* Affordance only — this is what makes the card read as tappable. */}
+                    <div className="flex items-center gap-1.5 pt-2.5 border-t border-slate-50">
+                      <i data-lucide="wallet" className="w-4 h-4 text-emerald-600"></i>
+                      <span className="flex-1 text-sm font-semibold text-emerald-700">View payments</span>
+                      <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300"></i>
+                    </div>
+                  </button>
                 </div>
               );
             })}
@@ -2935,6 +2998,65 @@ function App() {
                     className="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold disabled:opacity-40 transition">Apply revision</button>
                 </div>
               </>)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Loan actions ── everything that used to be a button on every loan
+          card, behind the card's ⋯. Same sheet shell as Revise above. */}
+      {sheetLoan && sheetStatus && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={() => setSheetLoanId(null)}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[88vh] overflow-y-auto overscroll-contain scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Avatar name={sheetLoan.borrower} />
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-800 truncate">{sheetLoan.borrower}</p>
+                    <p className="text-xs text-slate-400 truncate">{sheetLoan.ref || sheetLoan.id} · {fmt(sheetLoan.amount)} · {sheetStatus.overallStatus}</p>
+                  </div>
+                </div>
+                <button onClick={() => setSheetLoanId(null)} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+
+            <div className="px-4 py-3 space-y-1">
+              <SheetRow icon="square-pen" label="Edit loan details"
+                disabled={sheetStatus.overallStatus === "FULLY PAID"}
+                hint={sheetStatus.overallStatus === "FULLY PAID" ? "Fully paid loans can't be edited" : undefined}
+                onClick={() => { setSheetLoanId(null); editLoan(sheetLoan); }} />
+
+              <SheetRow icon="file-text" label="Loan agreement"
+                hint={sheetLoan.agreement ? "Signed copy on file" : "Fill in, sign and print"}
+                onClick={() => { setSheetLoanId(null); setAgreementLoanId(sheetLoan.id); setTab("agreement"); }} />
+
+              {/* IdPhotoButton keeps its own picker, downscale and viewer — the
+                  sheet only frames it. key= resets its state between loans. */}
+              <div className="pt-2">
+                <p className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Borrower ID</p>
+                <div className="px-1">
+                  <IdPhotoButton key={sheetLoan.id} image={sheetLoan.idImage}
+                    onUpload={d => saveIdImage(sheetLoan, d)}
+                    onRemove={() => removeIdImage(sheetLoan)} />
+                </div>
+              </div>
+
+              {/* Destructive: last, fenced off, text-only red. deleteLoan's own
+                  confirm() is still the guard. Not closed on tap — cancelling
+                  leaves the sheet up, confirming makes the loan vanish and the
+                  effect above closes it. */}
+              <div className="mt-3 pt-2 border-t border-slate-100">
+                <SheetRow icon="trash-2" label="Delete loan" danger
+                  hint="Also removes every payment logged against it"
+                  onClick={() => deleteLoan(sheetLoan.id, sheetLoan.ref)} />
+              </div>
             </div>
           </div>
         </div>
