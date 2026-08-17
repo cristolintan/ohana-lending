@@ -220,10 +220,20 @@
     /* Bottom-sheet entrance (modals that dock to the bottom edge on phones) */
     @keyframes sheetUp  { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: translateY(0); } }
     .animate-fade-in  { animation: fadeIn  0.25s ease-out both; }
-    .animate-fade-up  { animation: fadeUp  0.30s ease-out both; }
+    /* `backwards`, not `both`, on the two transform animations that wrap content
+       containing a position:fixed child (the full-screen ID viewer).
+       `forwards` would pin the last keyframe's transform on the element
+       permanently, and ANY transform — even an identity matrix — makes that
+       element the containing block for its fixed descendants, so the "full
+       screen" viewer would size itself to the card or sheet instead.
+       `backwards` still suppresses the pre-start flash, and the end state is
+       already the element's natural one (opacity 1, no transform).
+       slideUp below MUST keep `both`: the Toast's translate(-50%) is what
+       centers it, so dropping the final transform would knock it sideways. */
+    .animate-fade-up  { animation: fadeUp  0.30s ease-out backwards; }
     .animate-scale-in { animation: scaleIn 0.20s ease-out both; }
     .animate-slide-up { animation: slideUp 0.30s cubic-bezier(0.16, 1, 0.3, 1) both; }
-    .animate-sheet-up { animation: sheetUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .animate-sheet-up { animation: sheetUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
     /* Respect users who prefer reduced motion */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
