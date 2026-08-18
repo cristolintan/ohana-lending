@@ -454,6 +454,25 @@ function dayHeading(dateStr) {
     + (d.getFullYear() !== t.getFullYear() ? `, ${d.getFullYear()}` : "");
 }
 
+// How urgently a due date needs collecting, and how that reads to a lender.
+// Drives both the dashboard's buckets and its row sub-lines, so the two can
+// never disagree about what "this week" means.
+const DUE_BUCKETS = [
+  ["overdue", "Overdue"],
+  ["today", "Due today"],
+  ["week", "This week"],
+  ["later", "Later"],
+];
+function dueUrgency(dateStr) {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  const days = Math.round((parseDate(dateStr) - d0) / 86400000);
+  if (days < 0) return { bucket: "overdue", days, label: `${-days}d overdue` };
+  if (days === 0) return { bucket: "today", days, label: "due today" };
+  if (days === 1) return { bucket: "week", days, label: "due tomorrow" };
+  if (days <= 7) return { bucket: "week", days, label: `in ${days} days` };
+  return { bucket: "later", days, label: `in ${days} days` };
+}
+
 // Realized interest recognized for a loan from payments up to a cutoff date.
 // Allocates payments across the amortization schedule (oldest first) and sums
 // the interest share of each covered installment.
@@ -659,24 +678,29 @@ function EmptyPanel({ icon = "inbox", title, body, action, onAction }) {
   );
 }
 
-// First-paint placeholder for the Cash Flow tab. Same shapes as the real cards,
-// so nothing jumps when the data lands and no empty card ever flashes.
-function CashFlowSkeleton() {
+// First-paint placeholder. Same shapes as the real cards, so nothing jumps when
+// the data lands and no card ever flashes a zeroed amount. `tiles` is how many
+// small stat cards sit under the hero; `chart` adds the tall plot block.
+function ScreenSkeleton({ label, tiles = 2, chart = true }) {
   const bar = "bg-slate-100 rounded animate-pulse";
   return (
-    <div className="space-y-4" aria-busy="true" aria-label="Loading cash flow">
+    <div className="space-y-4" aria-busy="true" aria-label={label}>
       <div className={`${cardCls} p-4 space-y-3`}>
         <div className={`${bar} h-4 w-28`} /><div className={`${bar} h-10 w-full`} />
       </div>
       <div className={`${cardCls} p-5 space-y-3`}>
         <div className={`${bar} h-3 w-24`} /><div className={`${bar} h-10 w-48`} /><div className={`${bar} h-3 w-36`} />
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        {[0, 1].map(i => <div key={i} className={`${cardCls} p-4 space-y-2`}><div className={`${bar} h-3 w-16`} /><div className={`${bar} h-6 w-24`} /></div>)}
+      <div className={`grid gap-3 ${tiles === 3 ? "grid-cols-3" : "grid-cols-2"}`}>
+        {Array.from({ length: tiles }, (_, i) => (
+          <div key={i} className={`${cardCls} p-4 space-y-2`}><div className={`${bar} h-3 w-16`} /><div className={`${bar} h-6 w-20`} /></div>
+        ))}
       </div>
-      <div className={`${cardCls} p-4 space-y-3`}>
-        <div className={`${bar} h-4 w-32`} /><div className={`${bar} h-32 w-full`} />
-      </div>
+      {chart && (
+        <div className={`${cardCls} p-4 space-y-3`}>
+          <div className={`${bar} h-4 w-32`} /><div className={`${bar} h-32 w-full`} />
+        </div>
+      )}
       <div className={`${cardCls} p-4 space-y-3`}>
         <div className={`${bar} h-4 w-24`} />
         {[0, 1, 2, 3].map(i => <div key={i} className="flex items-center gap-3"><div className={`${bar} h-9 w-9 rounded-full`} /><div className="flex-1 space-y-1.5"><div className={`${bar} h-3 w-2/5`} /><div className={`${bar} h-2.5 w-1/4`} /></div><div className={`${bar} h-3 w-16`} /></div>)}
@@ -1237,6 +1261,15 @@ function App() {
   const [agreementLoanId, setAgreementLoanId] = useState(null);
   const [recordFilter, setRecordFilter] = useState("active");
   const [recordSearch, setRecordSearch] = useState("");
+  // ── Dashboard view state ──
+  // "Later" is the long tail of the collection list — collapsed until asked for.
+  const [homeShowLater, setHomeShowLater] = useState(false);
+  // Tapping an Overdue / Due today / This week tile jumps to that section.
+  const dueSectionRefs = useRef({});
+  const scrollToBucket = k => {
+    const el = dueSectionRefs.current[k];
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   // ── Cash flow view state ──
   // Period is a calendar month by default (what a lender actually reconciles),
   // with an all-time escape hatch. Aggregation only re-buckets the same rows.
@@ -1972,7 +2005,10 @@ function App() {
       ? `You collected ${fmt(diff)} more than you released ${period}.`
       : `You released ${fmt(-diff)} more than you collected ${period}.`;
   })();
-  const heroCls = (() => { const n = fmt(cashflow.balance).length; return n <= 11 ? "text-[2.25rem]" : n <= 13 ? "text-3xl" : "text-2xl"; })();
+  // A 320px phone fits ~11 digits at 36px. Stepping the hero down by digit count
+  // beats clipping or wrapping a peso amount mid-thousands.
+  const heroSize = v => { const n = fmt(v).length; return n <= 11 ? "text-[2.25rem]" : n <= 13 ? "text-3xl" : "text-2xl"; };
+  const heroCls = heroSize(cashflow.balance);
   const cfFilterCount = (cfDir !== "all" ? 1 : 0) + (cfGroup !== "all" ? 1 : 0) + (cfSearch.trim() ? 1 : 0);
   const cfChips = [
     cfDir !== "all" && [cfDir === "in" ? "Money in" : "Money out", () => setCfDir("all")],
@@ -2002,44 +2038,68 @@ function App() {
     };
   }, [db.queue, cashflow.balance]);
 
-  // Dashboard / landing overview: portfolio KPIs + the next outstanding
-  // installment per active borrower, surfaced earliest-due first.
+  // Dashboard / landing overview. Portfolio totals, plus the day's collection
+  // job: every active borrower placed in exactly one urgency bucket, carrying
+  // what they actually owe rather than a single installment.
   const dashboard = useMemo(() => {
-    const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const todayStr = iso(new Date());
-    const wk = new Date(); wk.setDate(wk.getDate() + 7); const weekStr = iso(wk);
-    const d0 = new Date(); d0.setHours(0, 0, 0, 0);
-    let outstanding = 0, overdueAmt = 0, dueThisWeek = 0, collectedAll = 0, activeCount = 0, paidCount = 0;
-    const dues = [];
+    const todayStr = isoDay(new Date());
+    let outstanding = 0, collectedAll = 0, activeCount = 0, paidCount = 0;
     db.loans.forEach(l => {
       const st = computeStatus(l, db.payments);
       collectedAll += st.totalLogged;
       if (st.overallStatus === "FULLY PAID") { paidCount++; return; }
       activeCount++;
       outstanding += st.grandLeft;
-      st.rows.forEach(r => {
-        if (r.amtLeft > 0.005) {
-          const due = iso(r.due);
-          if (due < todayStr) overdueAmt += r.amtLeft;
-          else if (due <= weekStr) dueThisWeek += r.amtLeft;
-        }
-      });
-      const next = st.rows.find(r => r.amtLeft > 0.005);
-      if (next) {
-        const due = iso(next.due);
-        const total = Number(l.amount) + st.summedInterest;
-        const pct = total > 0 ? Math.max(0, Math.min(1, st.totalLogged / total)) : 0;
-        const dd = Math.round((new Date(next.due.getFullYear(), next.due.getMonth(), next.due.getDate()) - d0) / 86400000);
-        const dueLabel = dd === 0 ? "due today" : dd < 0 ? `${-dd}d overdue` : dd === 1 ? "tomorrow" : `in ${dd} days`;
-        dues.push({ loanId: l.id, ref: l.ref, borrower: l.borrower, due: next.due, dueStr: due,
-          amtLeft: next.amtLeft, status: next.status, grandLeft: st.grandLeft, pct, dueLabel,
-          overdue: due < todayStr, soon: due >= todayStr && due <= weekStr });
-      }
     });
-    dues.sort((a, b) => a.dueStr < b.dueStr ? -1 : a.dueStr > b.dueStr ? 1 : 0);
-    return { activeCount, paidCount, outstanding, overdueAmt, dueThisWeek, collectedAll,
-      overdueCount: dues.filter(d => d.overdue).length, dues, cash: cashflow.balance };
-  }, [db.loans, db.payments, cashflow.balance]);
+
+    // Fold `upcoming.items` (every unpaid installment, already computed for the
+    // cash-flow forecast) down to one row per loan.
+    const byLoan = new Map();
+    upcoming.items.forEach(i => {
+      let r = byLoan.get(i.loanId);
+      if (!r) {
+        r = { loanId: i.loanId, ref: i.ref, borrower: i.borrower,
+          overdueAmt: 0, overdueCount: 0, todayAmt: 0, next: null };
+        byLoan.set(i.loanId, r);
+      }
+      if (i.dueStr < todayStr) { r.overdueAmt += i.amount; r.overdueCount++; }
+      else if (i.dueStr === todayStr) r.todayAmt += i.amount;
+      if (!r.next || i.dueStr < r.next.dueStr) r.next = i;   // items arrive earliest-first
+    });
+
+    // A borrower lands in their most urgent bucket only, so nobody is listed twice.
+    // Overdue rows show everything collectable right now (missed + due today);
+    // the rest show the installment that is coming.
+    const groups = Object.fromEntries(DUE_BUCKETS.map(([k]) => [k, { key: k, rows: [], total: 0 }]));
+    byLoan.forEach(r => {
+      const u = dueUrgency(r.next.dueStr);
+      const bucket = r.overdueCount > 0 ? "overdue" : u.bucket;
+      const amount = bucket === "overdue" ? r.overdueAmt + r.todayAmt
+        : bucket === "today" ? r.todayAmt
+        : r.next.amount;
+      const hint = bucket === "overdue"
+        ? (r.overdueCount > 1 ? `${r.overdueCount} missed · ${dueUrgency(r.next.dueStr).label}` : u.label)
+        : u.label;
+      const g = groups[bucket];
+      g.rows.push({ ...r, bucket, amount, hint, dueStr: r.next.dueStr });
+      g.total += amount;
+    });
+    DUE_BUCKETS.forEach(([k]) => groups[k].rows.sort((a, b) =>
+      a.dueStr < b.dueStr ? -1 : a.dueStr > b.dueStr ? 1 : 0));
+
+    const collectedToday = db.payments
+      .filter(p => p.date === todayStr)
+      .reduce((s, p) => s + (Number(p.amount) || 0), 0);
+
+    return {
+      activeCount, paidCount, outstanding, collectedAll, collectedToday,
+      groups, dueCount: byLoan.size,
+      overdueAmt: groups.overdue.total, overdueCount: groups.overdue.rows.length,
+      todayAmt: groups.today.total, todayCount: groups.today.rows.length,
+      weekAmt: groups.week.total, weekCount: groups.week.rows.length,
+      cash: cashflow.balance,
+    };
+  }, [db.loans, db.payments, upcoming, cashflow.balance]);
 
   const addQueueEntry = async () => {
     const borrower = qBorrower.trim();
@@ -2454,47 +2514,171 @@ function App() {
         <div key={tab} className="space-y-4 animate-fade-in">
 
         {/* ── HOME / DASHBOARD ── */}
-        {tab === "home" && (<>
-          <div className="flex items-center justify-between pt-1">
-            <div>
-              <p className="text-lg font-bold text-slate-800">{greeting()}{firstName(session && session.user && session.user.email) ? `, ${firstName(session.user.email)}` : ""}</p>
-              <p className="text-xs text-slate-400">{fmtDate(new Date())} · Ohana Lending</p>
-            </div>
-            {pushState === "on" ? (
-              <button onClick={disableAlerts} title="Tap to turn off alerts" className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 text-xs font-semibold px-3 py-1.5 rounded-full active:bg-emerald-100 transition shrink-0">
-                <i data-lucide="bell" className="w-3.5 h-3.5"></i> Alerts on
-              </button>
-            ) : (
-              <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold shrink-0">
-                {(((session && session.user && session.user.email) || "?").trim()[0] || "?").toUpperCase()}
+        {tab === "home" && (
+          <div className="mx-auto w-full max-w-6xl space-y-4">
+
+            {/* One compact line — the app header directly above already carries
+                the business name, so this doesn't repeat it. */}
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="min-w-0">
+                <p className="text-lg font-bold text-slate-800 leading-tight truncate">{greeting()}{firstName(session && session.user && session.user.email) ? `, ${firstName(session.user.email)}` : ""}</p>
+                <p className="text-xs text-slate-400">{fmtDate(new Date())}</p>
               </div>
+              {pushState === "on" ? (
+                <button onClick={disableAlerts} title="Tap to turn off alerts" className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 text-xs font-semibold px-3 py-1.5 rounded-full active:bg-emerald-100 transition shrink-0">
+                  <i data-lucide="bell" className="w-3.5 h-3.5"></i> Alerts on
+                </button>
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold shrink-0">
+                  {(((session && session.user && session.user.email) || "?").trim()[0] || "?").toUpperCase()}
+                </div>
+              )}
+            </div>
+
+            {loading ? <ScreenSkeleton label="Loading dashboard" tiles={3} chart={false} />
+            : db.loans.length === 0 ? (
+              <div className={cardCls}>
+                <EmptyPanel icon="file-text" title="No loans yet"
+                  body="Create your first loan and this screen will show your cash, who owes what, and who to collect from today."
+                  action="Create your first loan" onAction={() => { resetForm(); setTab("new"); }} />
+              </div>
+            ) : (
+
+            <div className="space-y-4 md:space-y-0 md:grid md:grid-cols-12 md:gap-4 md:items-start">
+
+              {/* ── CASH ON HAND — the number a lender acts on ── */}
+              <div className={`${cardCls} p-5 sm:p-6 md:col-span-5`}>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Cash on Hand</p>
+                <p className={`mt-1.5 ${heroSize(dashboard.cash)} leading-none font-bold tabular-nums ${dashboard.cash < 0 ? "text-red-600" : "text-slate-800"}`}>{fmt(dashboard.cash)}</p>
+                <p className="mt-2.5 text-xs text-slate-400">
+                  {dashboard.collectedToday > 0
+                    ? <><span className="font-semibold text-emerald-600 tabular-nums">+{fmt(dashboard.collectedToday)}</span> collected today</>
+                    : "Nothing collected yet today"}
+                </p>
+                <div className="mt-4 pt-3.5 border-t border-slate-100 space-y-1.5">
+                  <p className="text-xs text-slate-400 leading-relaxed">Money you can lend today. Cash already with borrowers is <span className="font-semibold text-slate-500">not</span> counted here.</p>
+                  {queueView.rows.length > 0 && (
+                    <button onClick={() => setTab("queue")} className="text-xs font-semibold text-emerald-600 active:opacity-70 flex items-center gap-1">
+                      {queueView.readyCount} of {queueView.rows.length} in the queue ready to fund
+                      <i data-lucide="chevron-right" className="w-3.5 h-3.5"></i>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* ── The day's job, in three numbers. Each jumps to its section. ── */}
+              <div className={`${cardCls} overflow-hidden md:col-span-7`}>
+                <div className="divide-y divide-slate-100 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x sm:divide-slate-100">
+                  {[
+                    ["overdue", "Overdue", "alert-triangle", dashboard.overdueAmt, dashboard.overdueCount, "text-amber-600", "text-amber-700"],
+                    ["today", "Due today", "calendar-clock", dashboard.todayAmt, dashboard.todayCount, "text-emerald-600", "text-slate-800"],
+                    ["week", "This week", "calendar-days", dashboard.weekAmt, dashboard.weekCount, "text-sky-600", "text-slate-800"],
+                  ].map(([k, label, icon, amt, n, iconTone, valTone]) => (
+                    <button key={k} onClick={() => scrollToBucket(k)} disabled={n === 0}
+                      className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left transition active:bg-slate-50 disabled:active:bg-transparent sm:block">
+                      <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                        <i data-lucide={icon} className={`w-3.5 h-3.5 ${n > 0 ? iconTone : "text-slate-300"}`}></i>{label}
+                      </span>
+                      <span className="text-right sm:text-left sm:block sm:mt-1">
+                        <span className={`block font-bold tabular-nums ${n > 0 ? valTone : "text-slate-400"}`}>{fmt(amt)}</span>
+                        <span className="block text-[11px] text-slate-400">{n} borrower{n !== 1 ? "s" : ""}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* ── Collections — every borrower in exactly one urgency bucket ──
+                  No overflow-hidden: it would become the scroll container for the
+                  sticky section headings and pin them in place. */}
+              <div className={`${cardCls} md:col-span-7`}>
+                <div className="px-4 py-3 border-b border-slate-100">
+                  <CardHead title="Collections"
+                    hint={dashboard.dueCount ? `${dashboard.dueCount} borrower${dashboard.dueCount !== 1 ? "s" : ""} with something outstanding` : undefined} />
+                </div>
+                {dashboard.dueCount === 0 ? (
+                  <EmptyPanel icon="check" title="All caught up"
+                    body="Nobody owes anything right now. New dues appear here as their dates come round."
+                    action="Add a borrower to the queue" onAction={() => setTab("queue")} />
+                ) : DUE_BUCKETS.map(([k, label]) => {
+                  const g = dashboard.groups[k];
+                  if (!g.rows.length) return null;
+                  const collapsible = k === "later" && g.rows.length > 5;
+                  const rows = collapsible && !homeShowLater ? g.rows.slice(0, 5) : g.rows;
+                  return (
+                    <section key={k} ref={el => { dueSectionRefs.current[k] = el; }}>
+                      <div className="sticky top-0 z-[1] px-4 py-1.5 bg-slate-50 border-y border-slate-100 flex items-center justify-between gap-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label} · {g.rows.length}</p>
+                        <p className={`text-[11px] font-semibold tabular-nums ${k === "overdue" ? "text-amber-600" : "text-slate-500"}`}>{fmt(g.total)}</p>
+                      </div>
+                      <ul className="divide-y divide-slate-50">
+                        {rows.map(r => (
+                          <li key={r.loanId}>
+                            <button onClick={() => { setLoanIdOvr(r.ref); setSelBorrower(""); setTab("status"); }}
+                              className="w-full text-left px-4 py-2.5 flex items-center gap-3 active:bg-slate-50 transition">
+                              <Avatar name={r.borrower} />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-slate-800 truncate">{r.borrower}</p>
+                                <p className={`text-[11px] truncate ${k === "overdue" ? "text-amber-600 font-medium" : "text-slate-400"}`}>{r.ref} · {r.hint}</p>
+                              </div>
+                              <p className={`text-sm font-bold tabular-nums shrink-0 ${k === "overdue" ? "text-amber-700" : "text-slate-800"}`}>{fmt(r.amount)}</p>
+                              <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300 shrink-0"></i>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                      {collapsible && (
+                        <button onClick={() => setHomeShowLater(v => !v)}
+                          className="w-full py-2.5 text-xs font-semibold text-slate-500 border-t border-slate-50 active:bg-slate-50 transition">
+                          {homeShowLater ? "Show less" : `Show all ${g.rows.length} later dues`}
+                        </button>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+
+              <div className="space-y-4 md:col-span-5">
+                {/* Portfolio context — kept, but out of the action zone. */}
+                <div className={`${cardCls} p-4`}>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Portfolio</p>
+                  <div className="mt-1.5 divide-y divide-slate-100">
+                    {[
+                      ["Outstanding", fmt(dashboard.outstanding), "principal + interest still owed"],
+                      ["Active loans", String(dashboard.activeCount), `${dashboard.paidCount} fully paid`],
+                      ["Collected all time", fmt(dashboard.collectedAll), null],
+                    ].map(([label, value, hint]) => (
+                      <div key={label} className="flex items-baseline justify-between gap-3 py-2">
+                        <span className="text-xs text-slate-500 min-w-0">
+                          {label}
+                          {hint && <span className="block text-[11px] text-slate-400">{hint}</span>}
+                        </span>
+                        <span className="text-sm font-bold tabular-nums text-slate-800 shrink-0">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Queue entry (always reachable from Home) */}
+                <button onClick={() => setTab("queue")} className={`w-full ${cardCls} px-4 py-3.5 flex items-center justify-between active:bg-slate-50 transition text-left`}>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center shrink-0"><i data-lucide="users" className="w-4 h-4"></i></div>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-800">Borrower Queue</p>
+                      <p className="text-xs text-slate-400 truncate">{queueView.rows.length === 0 ? "No one waiting — tap to add" : `${queueView.rows.length} waiting · ${queueView.readyCount} ready to fund`}</p>
+                    </div>
+                  </div>
+                  <i data-lucide="chevron-right" className="w-5 h-5 text-slate-300 shrink-0"></i>
+                </button>
+              </div>
+
+            </div>
             )}
-          </div>
-          <div className={`${cardCls} p-5`}>
-            <p className="text-slate-400 text-xs font-medium">Outstanding Balance</p>
-            <p className="text-3xl font-bold mt-1 tabular-nums text-slate-800">{fmt(dashboard.outstanding)}</p>
-            <p className="text-slate-400 text-xs mt-1.5">{dashboard.activeCount} active loan{dashboard.activeCount !== 1 ? "s" : ""} · {dashboard.paidCount} fully paid</p>
-          </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className={`${cardCls} p-3.5`}>
-              <p className="text-xs text-slate-500">Cash on Hand</p>
-              <p className={`mt-1 text-xl font-bold tabular-nums ${dashboard.cash >= 0 ? "text-slate-800" : "text-red-600"}`}>{fmt(dashboard.cash)}</p>
-            </div>
-            <div className={`${cardCls} p-3.5`}>
-              <p className="text-xs text-slate-500">Active Loans</p>
-              <p className="mt-1 text-xl font-bold tabular-nums text-slate-800">{dashboard.activeCount}</p>
-              <p className="mt-3 text-xs text-emerald-600 flex items-center gap-1"><i data-lucide="arrow-up-right" className="w-3.5 h-3.5"></i> {dashboard.dues.filter(d => d.soon).length} due this week</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Stat compact label="Overdue" value={fmt(dashboard.overdueAmt)} tone={dashboard.overdueAmt > 0 ? "red" : "slate"} />
-            <Stat compact label="Total Collected" value={fmt(dashboard.collectedAll)} tone="teal" />
-          </div>
-
-          {/* Enable alerts (Web Push) — full card only when not already on */}
-          {pushState !== "loading" && pushState !== "unsupported" && pushState !== "on" && (
+            {/* Setup nudges sit below the day's work — they are one-time chores,
+                not something to scroll past every morning. */}
+            {/* Enable alerts (Web Push) — full card only when not already on */}
+            {!loading && pushState !== "loading" && pushState !== "unsupported" && pushState !== "on" && (
             pushState === "ios-hint" ? (
               <div className="bg-amber-50 border border-amber-100 rounded-2xl px-4 py-3">
                 <p className="text-sm font-semibold text-amber-800 flex items-center gap-2"><i data-lucide="bell" className="w-4 h-4"></i> Turn on alerts</p>
@@ -2513,9 +2697,9 @@ function App() {
             )
           )}
 
-          {/* Install to home screen. Chromium hands us a deferred prompt; iOS has
-              no such API, so those users get the Share-sheet instructions. */}
-          {showInstallCard && (
+            {/* Install to home screen. Chromium hands us a deferred prompt; iOS has
+                no such API, so those users get the Share-sheet instructions. */}
+            {!loading && showInstallCard && (
             <div className={`${cardCls} p-4 space-y-3`}>
               <div className="flex items-start gap-3">
                 <img src="icons/icon-96.png" alt="" className="w-11 h-11 rounded-xl shrink-0" />
@@ -2538,50 +2722,8 @@ function App() {
             </div>
           )}
 
-          {/* Upcoming & overdue dues — one row per active borrower (their next unpaid installment) */}
-          <div className={`${cardCls} overflow-hidden`}>
-            <div className="px-4 py-3 border-b border-slate-50 flex items-center justify-between">
-              <p className="font-semibold text-slate-800">Upcoming Dues</p>
-              {dashboard.overdueCount > 0 &&
-                <span className="px-2 py-0.5 rounded-full bg-red-50 text-red-600 text-[11px] font-semibold">{dashboard.overdueCount} overdue</span>}
-            </div>
-            {dashboard.dues.length === 0 ? (
-              <div className="p-8 text-center space-y-2">
-                <p className="text-3xl">🎉</p>
-                <p className="text-slate-500 text-sm font-medium">All caught up — no dues right now.</p>
-                <button onClick={() => setTab("queue")} className="text-emerald-600 text-sm font-semibold active:opacity-70">Add a borrower to the queue →</button>
-              </div>
-            ) : dashboard.dues.map(d => (
-              <button key={d.loanId} onClick={() => { setLoanIdOvr(d.ref); setSelBorrower(""); setTab("status"); }}
-                className="w-full flex items-center gap-3 px-4 py-3 border-t border-slate-50 first:border-t-0 transition text-left active:bg-slate-50">
-                <Avatar name={d.borrower} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-baseline gap-2">
-                    <p className="font-semibold text-slate-800 truncate">{d.borrower}</p>
-                    <p className={`font-bold tabular-nums shrink-0 ${d.overdue ? "text-red-600" : d.soon ? "text-amber-600" : "text-slate-800"}`}>{fmt(d.amtLeft)}</p>
-                  </div>
-                  <div className="flex justify-between items-center mt-0.5 text-xs">
-                    <span className={`truncate ${d.overdue ? "text-red-500 font-medium" : "text-slate-400"}`}>{d.ref} · {d.dueLabel}</span>
-                    <span className="tabular-nums text-slate-400 shrink-0">{Math.round(d.pct * 100)}%</span>
-                  </div>
-                  <div className="mt-1.5"><ProgressBar pct={d.pct} tone={d.overdue ? "red" : d.soon ? "amber" : "emerald"} /></div>
-                </div>
-              </button>
-            ))}
           </div>
-
-          {/* Queue entry (always reachable from Home) */}
-          <button onClick={() => setTab("queue")} className={`w-full ${cardCls} px-4 py-3.5 flex items-center justify-between active:bg-slate-50 transition text-left`}>
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center"><i data-lucide="users" className="w-4 h-4"></i></div>
-              <div>
-                <p className="font-semibold text-slate-800">Borrower Queue</p>
-                <p className="text-xs text-slate-400">{queueView.rows.length === 0 ? "No one waiting — tap to add" : `${queueView.rows.length} waiting · ${queueView.readyCount} ready to fund`}</p>
-              </div>
-            </div>
-            <i data-lucide="chevron-right" className="w-5 h-5 text-slate-300"></i>
-          </button>
-        </>)}
+        )}
 
         {/* ── NEW LOAN ── */}
         {tab === "new" && (<>
@@ -2984,7 +3126,7 @@ function App() {
               </div>
             )}
 
-            {loading ? <CashFlowSkeleton />
+            {loading ? <ScreenSkeleton label="Loading cash flow" />
             : loadError && !cashflow.hasAnyActivity ? (
               <div className={cardCls}>
                 <EmptyPanel icon="wifi-off" title="We couldn't load your cash flow"
@@ -3006,7 +3148,7 @@ function App() {
 
               {/* ── 1 · AVAILABLE CASH — the one number that dominates ── */}
               <div className={`${cardCls} p-5 sm:p-6 md:col-span-6 lg:col-span-5`}>
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Available Cash</p>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Cash on Hand</p>
                 <p className={`mt-1.5 ${heroCls} leading-none font-bold tabular-nums ${cashflow.balance < 0 ? "text-red-600" : "text-slate-800"}`}>{fmt(cashflow.balance)}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-bold tabular-nums ${
@@ -3141,7 +3283,7 @@ function App() {
                 </div>
                 <div className="space-y-0.5">
                   <div className="flex items-baseline justify-between gap-2 py-1.5">
-                    <span className="text-xs text-slate-500">Available cash now</span>
+                    <span className="text-xs text-slate-500">Cash on hand now</span>
                     <span className="text-sm font-semibold tabular-nums text-slate-800">{fmt(forecast.cash)}</span>
                   </div>
                   <div className="flex items-baseline justify-between gap-2 py-1.5">

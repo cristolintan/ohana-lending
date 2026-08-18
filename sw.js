@@ -8,7 +8,7 @@
 //   • LIB   — third-party libraries from unpkg/jsdelivr. NOT versioned with the
 //     app, so shipping an app update no longer forces every device to
 //     re-download ~5 MB of React/Babel/charts over mobile data.
-const VERSION = "v18";
+const VERSION = "v19";
 const SHELL = `ohana-shell-${VERSION}`;
 const LIB = "ohana-lib-v1";
 const KEEP = [SHELL, LIB];
