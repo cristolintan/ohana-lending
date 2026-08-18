@@ -1264,6 +1264,9 @@ function App() {
   const [agreementLoanId, setAgreementLoanId] = useState(null);
   const [recordFilter, setRecordFilter] = useState("active");
   const [recordSearch, setRecordSearch] = useState("");
+  // Default is loan-ref order — the order the list has always been in. Nothing
+  // moves until this control is touched.
+  const [recordSort, setRecordSort] = useState("ref");
   // ── Dashboard view state ──
   // "Later" is the long tail of the collection list — collapsed until asked for.
   const [homeShowLater, setHomeShowLater] = useState(false);
@@ -1795,16 +1798,58 @@ function App() {
     }, { principal: 0, outstanding: 0, collected: 0, active: 0, overdue: 0 });
   }, [db.loans, db.payments]);
 
+  // The Loans directory. Every row carries what actually moves — what's left,
+  // when the next installment lands, how far along the loan is — derived here
+  // rather than in the JSX, since computeStatus is already being called per loan.
+  const loanRows = useMemo(() => {
+    const todayStr = today();
+    // Last payment per loan, for the settled rows' sub-line.
+    const lastPay = {};
+    db.payments.forEach(p => { if (!lastPay[p.loanId] || p.date > lastPay[p.loanId]) lastPay[p.loanId] = p.date; });
+    return db.loans.map(l => {
+      const s = computeStatus(l, db.payments);
+      const paid = s.overallStatus === "FULLY PAID";
+      const open = s.rows.filter(r => r.amtLeft > 0.005);
+      const nextRow = open[0] || null;
+      const missed = open.filter(r => isoDay(r.due) < todayStr).length;
+      const urgency = nextRow ? dueUrgency(isoDay(nextRow.due)) : null;
+      const hint = paid
+        ? `Fully paid${lastPay[l.id] ? ` · last payment ${fmtDate(parseDate(lastPay[l.id]))}` : ""}`
+        : !urgency ? "Nothing scheduled"
+        // Past the first week a countdown stops meaning anything — "in 63 days"
+        // is a number you have to convert back into a date. Show the date.
+        : urgency.bucket === "later" ? `due ${fmtDate(nextRow.due)}`
+        : urgency.bucket === "overdue" ? `${urgency.label}${missed > 1 ? ` · ${missed} missed` : ""}`
+        : urgency.label;
+      return {
+        l, s, paid, missed, hint, nextRow,
+        overdue: missed > 0,
+        pct: s.totalLogged / ((Number(l.amount) + s.summedInterest) || 1),
+      };
+    });
+  }, [db.loans, db.payments]);
+
   const filteredLoans = useMemo(() => {
     const q = recordSearch.trim().toLowerCase();
-    return db.loans
-      .map(l => ({ l, s: computeStatus(l, db.payments) }))
-      .filter(({ s }) =>
+    const rows = loanRows
+      .filter(r =>
         recordFilter === "all" ? true
-        : recordFilter === "paid" ? s.overallStatus === "FULLY PAID"
-        : s.overallStatus === "ACTIVE BALANCE")
+        : recordFilter === "paid" ? r.paid
+        : recordFilter === "overdue" ? r.overdue
+        : !r.paid)
       .filter(({ l }) => !q || l.borrower.toLowerCase().includes(q) || (l.ref || "").toLowerCase().includes(q));
-  }, [db.loans, db.payments, recordFilter, recordSearch]);
+    // "ref" is db.loans' own order (the API orders by ref) — left untouched so
+    // the default view is exactly the list this tab has always shown.
+    if (recordSort === "ref") return rows;
+    const by = {
+      // Earliest unpaid due date first, so the deepest arrears lead. Settled
+      // loans have no due date left and sink to the bottom.
+      urgent: (a, b) => (a.paid - b.paid) || (!a.nextRow || !b.nextRow ? 0 : a.nextRow.due - b.nextRow.due),
+      balance: (a, b) => b.s.grandLeft - a.s.grandLeft,
+      name: (a, b) => (a.l.borrower || "").localeCompare(b.l.borrower || ""),
+    };
+    return by[recordSort] ? rows.slice().sort(by[recordSort]) : rows;
+  }, [loanRows, recordFilter, recordSearch, recordSort]);
 
   const cashflow = useMemo(() => {
     const [start, end] = cfAllTime ? ALL_TIME : monthBounds(cfMonth);
@@ -2599,7 +2644,7 @@ function App() {
               <div className={`${cardCls} overflow-hidden md:col-span-7`}>
                 <div className="divide-y divide-slate-100 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x sm:divide-slate-100">
                   {[
-                    ["overdue", "Overdue", "alert-triangle", dashboard.overdueAmt, dashboard.overdueCount, "text-amber-600", "text-amber-700"],
+                    ["overdue", "Overdue", "alert-triangle", dashboard.overdueAmt, dashboard.overdueCount, "text-red-600", "text-red-700"],
                     ["today", "Due today", "calendar-clock", dashboard.todayAmt, dashboard.todayCount, "text-emerald-600", "text-slate-800"],
                     ["week", "This week", "calendar-days", dashboard.weekAmt, dashboard.weekCount, "text-sky-600", "text-slate-800"],
                   ].map(([k, label, icon, amt, n, iconTone, valTone]) => (
@@ -2638,7 +2683,7 @@ function App() {
                     <section key={k} ref={el => { dueSectionRefs.current[k] = el; }}>
                       <div className="sticky top-0 z-[1] px-4 py-1.5 bg-slate-50 border-y border-slate-100 flex items-center justify-between gap-2">
                         <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label} · {g.rows.length}</p>
-                        <p className={`text-[11px] font-semibold tabular-nums ${k === "overdue" ? "text-amber-600" : "text-slate-500"}`}>{fmt(g.total)}</p>
+                        <p className={`text-[11px] font-semibold tabular-nums ${k === "overdue" ? "text-red-600" : "text-slate-500"}`}>{fmt(g.total)}</p>
                       </div>
                       <ul className="divide-y divide-slate-50">
                         {rows.map(r => (
@@ -2648,9 +2693,9 @@ function App() {
                               <Avatar name={r.borrower} />
                               <div className="min-w-0 flex-1">
                                 <p className="text-sm font-medium text-slate-800 truncate">{r.borrower}</p>
-                                <p className={`text-[11px] truncate ${k === "overdue" ? "text-amber-600 font-medium" : "text-slate-400"}`}>{r.ref} · {r.hint}</p>
+                                <p className={`text-[11px] truncate ${k === "overdue" ? "text-red-600 font-medium" : "text-slate-400"}`}>{r.ref} · {r.hint}</p>
                               </div>
-                              <p className={`text-sm font-bold tabular-nums shrink-0 ${k === "overdue" ? "text-amber-700" : "text-slate-800"}`}>{fmt(r.amount)}</p>
+                              <p className={`text-sm font-bold tabular-nums shrink-0 ${k === "overdue" ? "text-red-700" : "text-slate-800"}`}>{fmt(r.amount)}</p>
                               <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300 shrink-0"></i>
                             </button>
                           </li>
@@ -2869,98 +2914,131 @@ function App() {
 
         {/* ── RECORDS ── */}
         {tab === "records" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="font-semibold text-slate-800">{db.loans.length} Loan{db.loans.length !== 1 ? "s" : ""}</p>
+          <div className="mx-auto w-full max-w-6xl space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-semibold text-slate-800 min-w-0 truncate">
+                {loading ? "Loans"
+                  : filteredLoans.length === db.loans.length ? `${db.loans.length} Loan${db.loans.length !== 1 ? "s" : ""}`
+                  : `${filteredLoans.length} of ${db.loans.length} loans`}
+              </p>
               {/* resetForm() matters: without it, tapping this right after an
                   Edit reopens the form still bound to that loan. */}
-              <button onClick={() => { resetForm(); setTab("new"); }} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ New</button>
+              <button onClick={() => { resetForm(); setTab("new"); }} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition shrink-0">+ New</button>
             </div>
             {canImport && <button onClick={importLocal} className="w-full py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-xs font-semibold active:bg-amber-100 transition">⤓ Import {localBackup.loans.length} loan(s) saved on this device</button>}
-            {db.loans.length > 0 && (
-              <div className="grid grid-cols-2 gap-3">
-                <Stat label="Outstanding" value={fmt(portfolio.outstanding)} tone="amber" />
-                <Stat label="Collected" value={fmt(portfolio.collected)} tone="emerald" />
-                <Stat label="Active Loans" value={portfolio.active} tone="teal" />
-                <Stat label="Overdue Loans" value={portfolio.overdue} tone={portfolio.overdue > 0 ? "red" : "slate"} />
-              </div>
-            )}
-            {db.loans.length > 0 && (
-              <div className="flex gap-1 p-1 bg-slate-100 rounded-xl">
-                {[["active", "Active"], ["all", "All"], ["paid", "Fully Paid"]].map(([k, lbl]) => (
-                  <button key={k} onClick={() => setRecordFilter(k)} className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition ${recordFilter === k ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500"}`}>
-                    {lbl} ({k === "all" ? db.loans.length : k === "active" ? portfolio.active : db.loans.length - portfolio.active})
-                  </button>
-                ))}
-              </div>
-            )}
-            {db.loans.length > 0 && (
-              <div className="relative">
-                <i data-lucide="search" className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                <input value={recordSearch} onChange={e => setRecordSearch(e.target.value)} placeholder="Search name or OL-####"
-                  className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-100 bg-white text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 transition" />
-              </div>
-            )}
-            {db.loans.length === 0 && (
-              <div className="bg-white rounded-2xl border border-slate-100 p-10 text-center space-y-3">
-                <p className="text-slate-400 text-sm">No loans yet.</p>
-                <button onClick={() => { resetForm(); setTab("new"); }} className="px-4 py-2.5 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition">+ Create your first loan</button>
-              </div>
-            )}
-            {db.loans.length > 0 && filteredLoans.length === 0 && (
-              <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">{recordSearch ? `No loans match “${recordSearch}”.` : `No ${recordFilter === "paid" ? "fully paid" : recordFilter === "active" ? "active" : ""} loans to show.`}</div>
-            )}
-            {/* Two tap targets per card, always: the card itself opens Payments,
-                and ⋯ opens the loan's action sheet. Edit / Agreement / ID photo /
-                Delete used to sit inline here — four to eight buttons per row,
-                with Delete at the same weight as Edit. */}
-            {filteredLoans.map(({ l, s }, i) => {
-              const isOverdue = s.rows.some(r => r.status !== "PAID" && r.due < parseDate(today()));
-              const pct = s.totalLogged / ((Number(l.amount) + s.summedInterest) || 1);
-              return (
-                <div key={l.id} style={{ animationDelay: `${Math.min(i, 8) * 50}ms` }} className={`${cardCls} relative p-4 animate-fade-up`}>
-                  {/* Sibling of the primary button, never nested inside it. */}
-                  <button type="button" aria-haspopup="dialog" aria-label={`More actions for ${l.borrower}`}
-                    onClick={() => { buzz(8); setSheetLoanId(l.id); }}
-                    className="absolute right-1.5 top-1.5 h-11 w-11 rounded-full flex items-center justify-center text-slate-400 active:bg-slate-100 transition">
-                    <i data-lucide="more-vertical" className="w-5 h-5"></i>
-                  </button>
 
-                  <button type="button" onClick={() => openPayments(l)} className="w-full text-left space-y-2 rounded-xl active:opacity-60 transition">
-                    <div className="flex items-start gap-3 min-w-0 pr-10">
-                      <Avatar name={l.borrower} />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs text-emerald-600 font-semibold">{l.ref || l.id}</p>
-                        <p className="font-bold truncate">{l.borrower}</p>
-                        <p className="text-xs text-slate-500 truncate">{l.terms} terms · {l.flatRate}% · {l.frequency} · {fmtDate(parseDate(l.startDate))}</p>
-                        {/* Chips carry the state the removed buttons used to imply. */}
-                        <div className="flex flex-wrap items-center gap-1 mt-1.5">
-                          {isOverdue && <Badge s="OVERDUE" />}
-                          <Badge s={s.overallStatus} />
-                          {l.idImage && <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[11px] font-semibold">🪪 ID</span>}
-                          {l.freqChange && <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[11px] font-semibold">Revised</span>}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 text-xs">
-                      <div className="bg-slate-50 rounded-lg p-2"><p className="text-slate-400">Amount</p><p className="font-bold">{fmt(l.amount)}</p></div>
-                      <div className="bg-emerald-50 rounded-lg p-2"><p className="text-slate-400">Paid</p><p className="font-bold text-emerald-700">{fmt(s.totalLogged)}</p></div>
-                      <div className="bg-amber-50 rounded-lg p-2"><p className="text-slate-400">Balance</p><p className="font-bold text-amber-700">{fmt(s.grandLeft)}</p></div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-xs text-slate-400 mb-1"><span>Repaid</span><span className="tabular-nums">{Math.round(pct * 100)}%</span></div>
-                      <ProgressBar pct={pct} tone={s.overallStatus === "FULLY PAID" ? "emerald" : isOverdue ? "red" : "emerald"} />
-                    </div>
-                    {/* Affordance only — this is what makes the card read as tappable. */}
-                    <div className="flex items-center gap-1.5 pt-2.5 border-t border-slate-50">
-                      <i data-lucide="wallet" className="w-4 h-4 text-emerald-600"></i>
-                      <span className="flex-1 text-sm font-semibold text-emerald-700">View payments</span>
-                      <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300"></i>
-                    </div>
-                  </button>
+            {loading ? <ScreenSkeleton label="Loading loans" tiles={2} chart={false} />
+            : db.loans.length === 0 ? (
+              <div className={cardCls}>
+                <EmptyPanel icon="file-text" title="No loans yet"
+                  body="Create your first loan and it will appear here with its balance, its next due date, and how far along it is."
+                  action="Create your first loan" onAction={() => { resetForm(); setTab("new"); }} />
+              </div>
+            ) : (<>
+
+              {/* Portfolio totals in one strip. The four stat tiles this replaced
+                  repeated the Portfolio card on Home and pushed the first loan
+                  below the fold. */}
+              <div className={`${cardCls} px-4 py-3`}>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Outstanding</p>
+                    <p className="mt-0.5 text-lg font-bold tabular-nums text-amber-600 truncate">{fmt(portfolio.outstanding)}</p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Collected</p>
+                    <p className="mt-0.5 text-lg font-bold tabular-nums text-emerald-600 truncate">{fmt(portfolio.collected)}</p>
+                  </div>
                 </div>
-              );
-            })}
+                <p className="mt-2 pt-2 border-t border-slate-50 text-xs text-slate-400">
+                  {portfolio.active} active ·{" "}
+                  <span className={portfolio.overdue > 0 ? "font-semibold text-red-600" : ""}>{portfolio.overdue} overdue</span>
+                  {" "}· {db.loans.length - portfolio.active} fully paid
+                </p>
+              </div>
+
+              {/* Stays put while the list scrolls — past a dozen loans the search
+                  box would otherwise mean scrolling back to the top. bg-white/90
+                  is remapped to the page ground in dark, so this reads as the page
+                  rather than as another card. */}
+              <div className="sticky top-0 z-[2] -mx-4 px-4 py-2 bg-white/90 backdrop-blur space-y-2">
+                <Segmented value={recordFilter} onChange={setRecordFilter} options={[
+                  ["active", `Active ${portfolio.active}`],
+                  ["overdue", `Overdue ${portfolio.overdue}`],
+                  ["paid", `Paid ${db.loans.length - portfolio.active}`],
+                  ["all", `All ${db.loans.length}`],
+                ]} />
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1 min-w-0">
+                    <i data-lucide="search" className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                    <input value={recordSearch} onChange={e => setRecordSearch(e.target.value)} placeholder="Search name or OL-####"
+                      className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-100 bg-white text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 transition" />
+                  </div>
+                  <select aria-label="Sort loans" value={recordSort} onChange={e => setRecordSort(e.target.value)}
+                    className="shrink-0 px-2.5 py-2.5 rounded-xl border border-slate-100 bg-white text-xs font-medium text-slate-500 outline-none focus:border-emerald-500 transition">
+                    <option value="ref">Loan ID</option>
+                    <option value="urgent">Most urgent</option>
+                    <option value="balance">Balance</option>
+                    <option value="name">Name</option>
+                  </select>
+                </div>
+              </div>
+
+              {filteredLoans.length === 0 ? (
+                <div className={cardCls}>
+                  {recordSearch
+                    ? <EmptyPanel icon="search" title={`No loans match “${recordSearch}”`}
+                        body="Try part of a borrower's name, or a loan number like OL-0007."
+                        action="Clear search" onAction={() => setRecordSearch("")} />
+                    : <EmptyPanel icon={recordFilter === "overdue" ? "check" : "inbox"}
+                        title={recordFilter === "overdue" ? "Nothing overdue"
+                          : recordFilter === "paid" ? "No loans fully paid yet" : "No active loans"}
+                        body={recordFilter === "overdue" ? "Every borrower is up to date on their installments." : undefined}
+                        action="Show all loans" onAction={() => setRecordFilter("all")} />}
+                </div>
+              ) : (
+                <div className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+                  {/* Two tap targets per row, always: the row opens Payments and
+                      ⋯ opens the loan’s action sheet. Siblings, never nested. */}
+                  {filteredLoans.map(({ l, s, paid, overdue, hint, pct }, i) => (
+                    <div key={l.id} style={{ animationDelay: `${Math.min(i, 10) * 40}ms` }} className={`${cardCls} relative animate-fade-up`}>
+                      <button type="button" aria-haspopup="dialog" aria-label={`More actions for ${l.borrower}`}
+                        onClick={() => { buzz(8); setSheetLoanId(l.id); }}
+                        className="absolute right-0.5 top-1/2 -translate-y-1/2 h-11 w-10 rounded-full flex items-center justify-center text-slate-400 active:bg-slate-100 transition">
+                        <i data-lucide="more-vertical" className="w-5 h-5"></i>
+                      </button>
+
+                      <button type="button" onClick={() => openPayments(l)}
+                        className="w-full text-left px-3.5 py-3 pr-11 flex items-start gap-3 rounded-2xl active:bg-slate-50 transition">
+                        <Avatar name={l.borrower} />
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <p className="font-bold text-slate-800 truncate min-w-0">{l.borrower}</p>
+                            <p className={`text-sm font-bold tabular-nums shrink-0 ${paid ? "text-emerald-600" : overdue ? "text-red-600" : "text-slate-800"}`}>
+                              {paid ? "Settled" : <>{fmt(s.grandLeft)} <span className="font-medium text-slate-400">left</span></>}
+                            </p>
+                          </div>
+                          {/* Overdue says so three ways — the word, the icon and the
+                              colour — so the reading never rests on colour alone. */}
+                          <p className={`flex items-center gap-1 text-[11px] min-w-0 ${overdue ? "text-red-600 font-medium" : "text-slate-400"}`}>
+                            {overdue && <i data-lucide="alert-triangle" className="w-3 h-3 shrink-0"></i>}
+                            <span className="truncate">{l.ref || l.id} · {hint}{l.freqChange ? " · Revised" : ""}</span>
+                          </p>
+                          <div className="flex items-center gap-2 pt-0.5">
+                            <div className="flex-1 min-w-0"><ProgressBar pct={pct} tone={paid ? "emerald" : overdue ? "red" : "emerald"} /></div>
+                            <span className="text-[11px] tabular-nums text-slate-400 shrink-0">
+                              {Math.round(pct * 100)}%
+                              <span className="hidden sm:inline"> · {fmt(s.totalLogged)} of {fmt(Number(l.amount) + s.summedInterest)}</span>
+                              <span className="sm:hidden"> repaid</span>
+                            </span>
+                          </div>
+                        </div>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>)}
           </div>
         )}
 
@@ -3332,12 +3410,12 @@ function App() {
                   </div>
                   <div className="flex items-baseline justify-between gap-2 py-1.5">
                     <span className="text-xs text-slate-500 min-w-0">
-                      <span className={`font-semibold ${forecast.overdueCount ? "text-amber-600" : "text-slate-300"}`}>+</span> Overdue collections
+                      <span className={`font-semibold ${forecast.overdueCount ? "text-red-600" : "text-slate-300"}`}>+</span> Overdue collections
                       <span className="block text-[11px] text-slate-400">
                         {forecast.overdueCount ? `${forecast.overdueCount} installment${forecast.overdueCount !== 1 ? "s" : ""} already past due` : "nothing past due"}
                       </span>
                     </span>
-                    <span className={`text-sm font-semibold tabular-nums ${forecast.overdueCount ? "text-amber-700" : "text-slate-400"}`}>{fmt(forecast.overdueAmt)}</span>
+                    <span className={`text-sm font-semibold tabular-nums ${forecast.overdueCount ? "text-red-700" : "text-slate-400"}`}>{fmt(forecast.overdueAmt)}</span>
                   </div>
                   <div className="flex items-baseline justify-between gap-2 py-1.5">
                     <span className="text-xs text-slate-500 min-w-0">
@@ -3360,7 +3438,7 @@ function App() {
                 </div>
                 {forecast.overdueCount > 0 && (
                   <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Includes <span className="font-semibold text-amber-700">{fmt(forecast.overdueAmt)}</span> already overdue — this assumes you collect it.
+                    Includes <span className="font-semibold text-red-700">{fmt(forecast.overdueAmt)}</span> already overdue — this assumes you collect it.
                   </p>
                 )}
                 <p className="text-[11px] text-slate-400 leading-relaxed">Counts everything past due plus unpaid installments due on or before {fmtDate(parseDate(forecast.horizon))}, less borrowers queued for release by then.</p>
