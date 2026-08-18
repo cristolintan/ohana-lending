@@ -1284,6 +1284,17 @@ function App() {
   const [cfGroup, setCfGroup] = useState("all");    // CF_GROUPS key
   const [cfSearch, setCfSearch] = useState("");     // borrower or loan ref
   const [cfProjected, setCfProjected] = useState(false);
+  // Which "what does this mean?" bubble is open. Hover alone would be dead on a
+  // touch screen, so the icon is a real button and this holds the tapped one.
+  const [cfInfo, setCfInfo] = useState(null);
+  // A tapped-open bubble should close when you tap anywhere else. Registered on
+  // the next tick so the click that opened it doesn't immediately shut it.
+  useEffect(() => {
+    if (!cfInfo) return;
+    const close = () => setCfInfo(null);
+    const t = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => { clearTimeout(t); document.removeEventListener("click", close); };
+  }, [cfInfo]);
   const [cfFilterOpen, setCfFilterOpen] = useState(false);
   const [cfEntryOpen, setCfEntryOpen] = useState(false);
   // Forecast horizon. Defaults to 30 days out, but the lender picks the date —
@@ -3271,16 +3282,34 @@ function App() {
                 </div>
                 <div className="pt-3 border-t border-slate-100">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Out with borrowers · not available cash</p>
+                  {/* The three read as a chain — released, of that what is still
+                      unpaid, and what that becomes once interest is added — so
+                      each explanation leans on the one before it.
+                      The bubble is positioned against the row (which carries
+                      `relative`), not the button, so it spans the row's width and
+                      can never be clipped by `main`'s horizontal overflow. */}
                   <div className="mt-1.5 divide-y divide-slate-100 lg:divide-y-0 lg:grid lg:grid-cols-3 lg:gap-3">
                     {[
-                      ["Loaned out", fmt(cashflow.loanedOut), `${cashflow.activeLoans} active loan${cashflow.activeLoans !== 1 ? "s" : ""}`],
-                      ["Outstanding principal", fmt(cashflow.outstandingPrincipal), "capital still out"],
-                      ["Expected back", fmt(cashflow.expectedCollections), "with interest"],
+                      ["Loaned out", fmt(cashflow.loanedOut),
+                        `Full amount you released on the ${cashflow.activeLoans} loan${cashflow.activeLoans !== 1 ? "s" : ""} still running.`],
+                      ["Outstanding principal", fmt(cashflow.outstandingPrincipal),
+                        "Of that, the capital borrowers have not paid back yet."],
+                      ["Expected back", fmt(cashflow.expectedCollections),
+                        "Outstanding principal plus the interest they still owe."],
                     ].map(([label, value, hint]) => (
-                      <div key={label} className="flex items-baseline justify-between gap-2 py-2 lg:block lg:py-0">
-                        <p className="text-xs text-slate-500 lg:text-[11px] lg:text-slate-400">{label}</p>
-                        <p className="font-bold tabular-nums text-slate-800 text-sm lg:mt-0.5 lg:text-base">{value}</p>
-                        <p className="hidden lg:block text-[11px] text-slate-400">{hint}</p>
+                      <div key={label} className="relative flex items-baseline justify-between gap-2 py-2 lg:block lg:py-0">
+                        <p className="text-xs font-medium text-slate-500 lg:text-[11px] lg:text-slate-400 flex items-center gap-1 min-w-0">
+                          <span className="truncate">{label}</span>
+                          <button type="button" aria-label={`What does ${label} mean?`} aria-expanded={cfInfo === label}
+                            onClick={e => { e.stopPropagation(); setCfInfo(cfInfo === label ? null : label); }}
+                            className="group inline-flex items-center justify-center w-5 h-5 -m-0.5 shrink-0 rounded-full text-slate-300 hover:text-slate-500 transition-colors">
+                            <i data-lucide="info" className="w-3.5 h-3.5"></i>
+                            <span role="tooltip"
+                              className={`pointer-events-none absolute left-0 right-0 top-full z-20 mt-1 rounded-lg bg-slate-900 px-2.5 py-2 text-left text-[11px] font-normal leading-snug text-white shadow-lg transition-opacity group-hover:opacity-100 ${
+                                cfInfo === label ? "opacity-100" : "opacity-0"}`}>{hint}</span>
+                          </button>
+                        </p>
+                        <p className="font-bold tabular-nums text-slate-800 text-sm shrink-0 lg:mt-0.5 lg:text-base">{value}</p>
                       </div>
                     ))}
                   </div>
