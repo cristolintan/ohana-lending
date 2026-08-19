@@ -3769,7 +3769,7 @@ function App() {
             <p className="text-[13px] font-bold tracking-[0.18em] text-emerald-600">PAYMENT SCHEDULE</p>
             <p className="mt-1 text-3xl font-bold text-slate-900 leading-tight">{name.trim() || "Unnamed borrower"}</p>
             <p className="mt-2 text-[15px] text-slate-500">
-              Release date <span className="font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
+              Release date <span className="text-lg font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
               <span className="text-slate-300"> · </span>
               {Math.floor(Number(terms) || 0)} {frequency.toLowerCase()} payments
               <span className="text-slate-300"> · </span>
