@@ -3773,7 +3773,7 @@ function App() {
               <span className="text-slate-300"> · </span>
               {Math.floor(Number(terms) || 0)} {frequency.toLowerCase()} payments
               <span className="text-slate-300"> · </span>
-              {flatRate}% flat{Number(dropRate) !== Number(flatRate) ? ` · ${dropRate}% diminishing` : ""}
+              {/* {flatRate}% flat{Number(dropRate) !== Number(flatRate) ? ` · ${dropRate}% diminishing` : ""} */}
             </p>
 
             <div className="mt-5 grid grid-cols-3 gap-3">
