@@ -3763,43 +3763,44 @@ function App() {
           it costs in total. Lives outside <main> so nothing clips it. */}
       {calc.rows.length > 0 && (
         <div id="schedule-export-doc" aria-hidden="true"
-          style={{ position: "fixed", top: 0, left: "-10000px", width: "760px", background: "#ffffff" }}>
-          <div className="px-9 pt-9 pb-7">
-            <p className="text-[11px] font-bold tracking-[0.18em] text-emerald-600">PAYMENT SCHEDULE</p>
+          style={{ position: "fixed", top: 0, left: "-10000px", background: "#ffffff",
+                   width: "max-content", maxWidth: "760px" }}>
+          <div className="px-5 pt-7 pb-6">
+            <p className="text-[13px] font-bold tracking-[0.18em] text-emerald-600">PAYMENT SCHEDULE</p>
             <p className="mt-1 text-3xl font-bold text-slate-900 leading-tight">{name.trim() || "Unnamed borrower"}</p>
-            <p className="mt-1.5 text-sm text-slate-500">
-              Release date <span className="font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
+            <p className="mt-2 text-[15px] text-slate-500">
+              Release date <span className="text-lg font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
               <span className="text-slate-300"> · </span>
               {Math.floor(Number(terms) || 0)} {frequency.toLowerCase()} payments
               <span className="text-slate-300"> · </span>
-              {flatRate}% flat{Number(dropRate) !== Number(flatRate) ? ` · ${dropRate}% diminishing` : ""}
+              {/* {flatRate}% flat{Number(dropRate) !== Number(flatRate) ? ` · ${dropRate}% diminishing` : ""} */}
             </p>
 
-            <div className="mt-6 grid grid-cols-3 gap-3">
-              <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Loan amount</p>
-                <p className="mt-0.5 text-xl font-bold text-slate-900 tabular-nums">{fmt(amount)}</p>
+            <div className="mt-5 grid grid-cols-3 gap-3">
+              <div className="rounded-2xl bg-slate-50 px-3 py-3">
+                <p className="text-[12px] font-semibold uppercase tracking-wide text-slate-400">Loan amount</p>
+                <p className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">{fmt(amount)}</p>
               </div>
-              <div className="rounded-2xl bg-amber-50 px-4 py-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-600">Total interest</p>
-                <p className="mt-0.5 text-xl font-bold text-amber-700 tabular-nums">{fmt(calc.totalInterest)}</p>
+              <div className="rounded-2xl bg-amber-50 px-3 py-3">
+                <p className="text-[12px] font-semibold uppercase tracking-wide text-amber-600">Total interest</p>
+                <p className="mt-1 text-2xl font-bold text-amber-700 tabular-nums">{fmt(calc.totalInterest)}</p>
               </div>
-              <div className="rounded-2xl bg-emerald-50 px-4 py-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">Total repayment</p>
-                <p className="mt-0.5 text-xl font-bold text-emerald-700 tabular-nums">{fmt(calc.totalRepay)}</p>
+              <div className="rounded-2xl bg-emerald-50 px-3 py-3">
+                <p className="text-[12px] font-semibold uppercase tracking-wide text-emerald-600">Total repayment</p>
+                <p className="mt-1 text-2xl font-bold text-emerald-700 tabular-nums">{fmt(calc.totalRepay)}</p>
               </div>
             </div>
           </div>
 
           {/* Due date sits second: it is the column a borrower reads first. */}
-          <table className="w-full text-sm" style={{ borderCollapse: "collapse" }}>
+          <table className="w-full text-[17px] leading-6" style={{ borderCollapse: "collapse" }}>
             <thead>
               <tr className="bg-slate-100 text-slate-500">
-                <th className="px-4 py-2.5 text-left text-xs font-bold uppercase tracking-wide">No.</th>
-                <th className="px-4 py-2.5 text-left text-xs font-bold uppercase tracking-wide">Due date</th>
-                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Principal</th>
-                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Interest</th>
-                <th className="px-4 py-2.5 text-right text-xs font-bold uppercase tracking-wide">Amount due</th>
+                <th className="pl-5 pr-3 py-3 text-left text-[13px] font-bold uppercase tracking-wide">No.</th>
+                <th className="px-3 py-3 text-left text-[13px] font-bold uppercase tracking-wide">Due date</th>
+                <th className="px-3 py-3 text-right text-[13px] font-bold uppercase tracking-wide">Principal</th>
+                <th className="px-3 py-3 text-right text-[13px] font-bold uppercase tracking-wide">Interest</th>
+                <th className="pl-3 pr-5 py-3 text-right text-[13px] font-bold uppercase tracking-wide">Amount due</th>
               </tr>
             </thead>
             <tbody>
@@ -3807,25 +3808,25 @@ function App() {
                 <tr key={r.period} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                   {/* slate-500 not 400: this is a document someone has to read,
                       and 400 on white falls under the AA contrast floor. */}
-                  <td className="px-4 py-2.5 font-semibold text-slate-500 tabular-nums">{r.period}</td>
-                  <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{fmtDate(r.due)}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-600 tabular-nums">{fmt(r.principal)}</td>
-                  <td className="px-4 py-2.5 text-right text-amber-600 tabular-nums">{fmt(r.interest)}</td>
-                  <td className="px-4 py-2.5 text-right font-bold text-slate-900 tabular-nums">{fmt(r.total)}</td>
+                  <td className="pl-5 pr-3 py-2 font-semibold text-slate-500 tabular-nums">{r.period}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">{fmtDate(r.due)}</td>
+                  <td className="px-3 py-2 text-right text-[#27313e] tabular-nums whitespace-nowrap">{fmt(r.principal)}</td>
+                  <td className="px-3 py-2 text-right text-[#eb652e] tabular-nums whitespace-nowrap">{fmt(r.interest)}</td>
+                  <td className="pl-3 pr-5 py-2 text-right font-bold text-slate-900 tabular-nums whitespace-nowrap">{fmt(r.total)}</td>
                 </tr>
               ))}
               <tr className="bg-emerald-50">
-                <td className="px-4 py-3 font-bold text-emerald-800" colSpan={2}>Total</td>
-                <td className="px-4 py-3 text-right font-bold text-slate-700 tabular-nums">{fmt(amount)}</td>
-                <td className="px-4 py-3 text-right font-bold text-amber-700 tabular-nums">{fmt(calc.totalInterest)}</td>
-                <td className="px-4 py-3 text-right font-bold text-emerald-700 tabular-nums">{fmt(calc.totalRepay)}</td>
+                <td className="pl-5 pr-3 py-3.5 font-bold text-emerald-800" colSpan={2}>Total</td>
+                <td className="px-3 py-3.5 text-right font-bold text-slate-700 tabular-nums">{fmt(amount)}</td>
+                <td className="px-3 py-3.5 text-right font-bold text-amber-700 tabular-nums">{fmt(calc.totalInterest)}</td>
+                <td className="pl-3 pr-5 py-3.5 text-right font-bold text-emerald-700 tabular-nums">{fmt(calc.totalRepay)}</td>
               </tr>
             </tbody>
           </table>
 
-          <div className="px-9 py-5 border-t border-slate-100 flex items-baseline justify-between">
-            <p className="text-xs text-slate-500">Projection only — not a receipt. Amounts assume every installment is paid in full and on time.</p>
-            <p className="text-xs text-slate-500 whitespace-nowrap ml-4">Generated {fmtDate(new Date())}</p>
+          <div className="px-5 py-4 border-t border-slate-100 flex items-baseline justify-between">
+            <p className="text-[13px] text-slate-500 max-w-[300px]">Projection only — not a receipt. Amounts assume every installment is paid in full and on time.</p>
+            <p className="text-[13px] text-slate-500 whitespace-nowrap ml-4">Generated {fmtDate(new Date())}</p>
           </div>
         </div>
       )}
