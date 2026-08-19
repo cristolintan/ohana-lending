@@ -1345,6 +1345,16 @@ function App() {
   const [revFreq, setRevFreq] = useState("");
   const [revTerms, setRevTerms] = useState("");
   const [reviseOpen, setReviseOpen] = useState(false); // schedule revision lives in a modal
+  // Logging a payment is the job this screen exists for, so the form lives in a
+  // sheet behind a button that stays reachable however far you have scrolled.
+  const [paySheetOpen, setPaySheetOpen] = useState(false);
+  const [payInfo, setPayInfo] = useState(false);       // "what is Minimum Due?" bubble
+  useEffect(() => {                                    // outside-tap dismissal
+    if (!payInfo) return;
+    const close = () => setPayInfo(false);
+    const t = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => { clearTimeout(t); document.removeEventListener("click", close); };
+  }, [payInfo]);
   // Per-loan action sheet. Holds the id, never the loan object: saving an ID
   // photo calls refresh(), which swaps db.loans for fresh objects — a captured
   // object would keep painting the old idImage.
@@ -1783,7 +1793,6 @@ function App() {
     catch (err) { console.error(err); flash(err.message || "Could not remove."); }
   };
 
-  const borrowers = useMemo(() => [...new Set(db.loans.map(l => l.borrower))], [db.loans]);
 
   const portfolio = useMemo(() => {
     const td = parseDate(today());
@@ -2357,24 +2366,40 @@ function App() {
     catch (e) { console.error(e); flash("Could not save agreement — check connection."); }
   };
 
+  // One search term resolves the loan being worked on. `loanIdOvr` doubles as
+  // that box; `selBorrower` is kept because older deep links still write it.
+  // Returns exactly one of: {prompt} · {loan} · {choices} · {error}.
   const resolved = useMemo(() => {
-    if (loanIdOvr.trim()) {
-      const q = loanIdOvr.trim();
-      const loan = db.loans.find(l => l.id === q || (l.ref && l.ref.toLowerCase() === q.toLowerCase()));
-      return loan ? { loan } : { error: "Loan not found." };
-    }
-    if (selBorrower) {
-      const active = db.loans.filter(l => l.borrower === selBorrower).find(l => computeStatus(l, db.payments).overallStatus !== "FULLY PAID");
-      return active ? { loan: active } : { error: "No active loan for this borrower." };
-    }
-    return { prompt: true };
+    const raw = loanIdOvr.trim() || selBorrower.trim();
+    if (!raw) return { prompt: true };
+    const q = raw.toLowerCase();
+    // An exact id or ref wins outright — that is what a tap-through from Home
+    // or Loans writes, and it must land on one loan even if a name also matches.
+    const exact = db.loans.find(l => l.id === raw || (l.ref || "").toLowerCase() === q);
+    if (exact) return { loan: exact };
+    const hits = db.loans.filter(l =>
+      (l.borrower || "").toLowerCase().includes(q) || (l.ref || "").toLowerCase().includes(q));
+    if (!hits.length) return { error: `No loan matches “${raw}”.` };
+    // A borrower with two loans used to get the first active one picked for
+    // them, silently. Prefer the running ones, then let them choose.
+    const running = hits.filter(l => computeStatus(l, db.payments).overallStatus !== "FULLY PAID");
+    const pool = running.length ? running : hits;
+    return pool.length === 1 ? { loan: pool[0] } : { choices: pool };
   }, [db, selBorrower, loanIdOvr]);
+
+  const clearLoan = () => { setLoanIdOvr(""); setSelBorrower(""); setPaySheetOpen(false); };
 
   const statusData = useMemo(() => resolved.loan ? computeStatus(resolved.loan, db.payments) : null, [resolved, db.payments]);
 
   const nextUnpaidRow = useMemo(() => {
     if (!statusData) return null;
-    return statusData.rows.find(r => r.amtLeft > 0) || statusData.rows[statusData.rows.length - 1] || null;
+    // Half a centavo, the same epsilon every other balance test in this file
+    // uses. `> 0` matched floating-point dust: paying an installment exactly
+    // can leave ~1e-13 on it, so the row that was just settled still counted as
+    // unpaid — the next-due amount rendered as ₱0.00 and the days-overdue came
+    // from that old row's date. No fallback to the last row either: when
+    // nothing is outstanding there is no next payment to name.
+    return statusData.rows.find(r => r.amtLeft > 0.005) || null;
   }, [statusData]);
 
   useEffect(() => {
@@ -2386,11 +2411,14 @@ function App() {
     }
   }, [payType, nextUnpaidRow]);
 
+  // Returns whether the payment was banked (server or outbox). The caller uses
+  // it to decide whether to close the sheet — a rejected entry has to stay on
+  // screen with its values, or the flash message lands on a dismissed form.
   const addPayment = async () => {
-    if (!resolved.loan) return;
+    if (!resolved.loan) return false;
     const amt = Number(payAmount);
-    if (!(amt > 0)) { flash("Enter a payment amount."); return; }
-    if (!payDate) { flash("Pick a payment date."); return; }
+    if (!(amt > 0)) { flash("Enter a payment amount."); return false; }
+    if (!payDate) { flash("Pick a payment date."); return false; }
     //if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
     const row = { id: uuid(), loanId: resolved.loan.id, date: payDate, amount: amt, type: payType };
     try {
@@ -2412,17 +2440,23 @@ function App() {
         target: session?.user?.id,
         excludeEndpoint: pushEndpoint,
       });
+      return true;
     } catch (e) {
-      if (!isNetworkError(e)) { console.error(e); flash("Save failed — the server rejected it."); return; }
+      if (!isNetworkError(e)) { console.error(e); flash("Save failed — the server rejected it."); return false; }
       // No signal: bank it locally. The balance, schedule and dues update now;
       // the row syncs itself the moment the phone reconnects.
       await enqueue("payment", row, prev => ({ ...prev, payments: [...prev.payments, { ...row, pending: true }] }));
       buzz();
       setPayAmount("");
       flash(`Saved offline — ${fmt(amt)} syncs when you're back online.`);
+      return true;
     }
   };
   const deletePayment = async p => {
+    // Same guard deleteLoan has. A payment row is 12px tall on a phone and the
+    // delete used to fire straight off the tap — one slip destroyed a record
+    // and silently moved the borrower's balance.
+    if (!window.confirm(`Delete this ${fmt(p.amount)} payment from ${fmtDate(parseDate(p.date))}?\n\nThe balance and schedule will recalculate.`)) return;
     if (p.pending) { await discardQueued("payments", p.id); flash("Queued payment discarded."); return; }
     try { await api.delPayment(p.id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); }
   };
@@ -2915,16 +2949,7 @@ function App() {
         {/* ── RECORDS ── */}
         {tab === "records" && (
           <div className="mx-auto w-full max-w-6xl space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <p className="font-semibold text-slate-800 min-w-0 truncate">
-                {loading ? "Loans"
-                  : filteredLoans.length === db.loans.length ? `${db.loans.length} Loan${db.loans.length !== 1 ? "s" : ""}`
-                  : `${filteredLoans.length} of ${db.loans.length} loans`}
-              </p>
-              {/* resetForm() matters: without it, tapping this right after an
-                  Edit reopens the form still bound to that loan. */}
-              <button onClick={() => { resetForm(); setTab("new"); }} className="px-3.5 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-sm font-semibold transition shrink-0">+ New</button>
-            </div>
+            
             {canImport && <button onClick={importLocal} className="w-full py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-xs font-semibold active:bg-amber-100 transition">⤓ Import {localBackup.loans.length} loan(s) saved on this device</button>}
 
             {loading ? <ScreenSkeleton label="Loading loans" tiles={2} chart={false} />
@@ -3043,28 +3068,72 @@ function App() {
         )}
 
         {/* ── STATUS ── */}
-        {tab === "status" && (<>
-          <div className="bg-white rounded-2xl border border-slate-100 p-4 grid grid-cols-2 gap-3 shadow-sm">
-            <p className="col-span-2 font-semibold text-slate-800">Find Loan</p>
-            <div>
-              <label className={labelCls}>Borrower</label>
-              <select className={inputCls} value={selBorrower} onChange={e => { setSelBorrower(e.target.value); setLoanIdOvr(""); }}>
-                <option value="">— select —</option>
-                {borrowers.map(b => <option key={b}>{b}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>Or Loan ID</label>
-              <input className={inputCls} value={loanIdOvr} onChange={e => setLoanIdOvr(e.target.value)} placeholder="OL-0001" />
-            </div>
-          </div>
+        {tab === "status" && (
+          <div className="mx-auto w-full max-w-6xl space-y-3">
 
-          {resolved.prompt && <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">Select a borrower or enter a Loan ID.</div>}
-          {resolved.error && <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center text-amber-600 font-medium text-sm">{resolved.error}</div>}
+          {loading ? <ScreenSkeleton label="Loading payments" tiles={2} chart={false} />
+          : db.loans.length === 0 ? (
+            <div className={cardCls}>
+              <EmptyPanel icon="file-text" title="No loans yet"
+                body="Create a loan first — this is where you log what each borrower pays back against it."
+                action="Create your first loan" onAction={() => { resetForm(); setTab("new"); }} />
+            </div>
+          ) : (<>
 
-          {resolved.loan && statusData && (<>
-            <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-3">
-              <div className="flex items-center justify-between gap-2">
+          {/* The search only holds the top of the screen while there is nothing
+              open. Once a loan resolves it collapses to "Change loan" in the
+              header, so the loan itself is the first thing you see. */}
+          {!resolved.loan && (
+            <div className="relative">
+              <i data-lucide="search" className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+              <input value={loanIdOvr} onChange={e => { setSelBorrower(""); setLoanIdOvr(e.target.value); }}
+                placeholder="Search name or OL-####" aria-label="Find a loan"
+                className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-100 bg-white text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 transition" />
+            </div>
+          )}
+
+          {resolved.prompt && (
+            <div className={cardCls}>
+              <EmptyPanel icon="wallet" title="Pick a loan to work on"
+                body="Search a borrower's name or a loan number above, or open one from the Loans tab."
+                action="Choose from Loans" onAction={() => setTab("records")} />
+            </div>
+          )}
+          {resolved.error && (
+            <div className={cardCls}>
+              <EmptyPanel icon="search" title={resolved.error}
+                body="Try part of the borrower's name, or a loan number like OL-0007."
+                action="Clear search" onAction={clearLoan} />
+            </div>
+          )}
+          {resolved.choices && (
+            <div className={cardCls}>
+              <div className="px-4 py-3 border-b border-slate-100">
+                <CardHead title={`${resolved.choices.length} loans match`} hint="Pick the one you're collecting on." />
+              </div>
+              <ul className="divide-y divide-slate-50">
+                {resolved.choices.map(l => (
+                  <li key={l.id}>
+                    <button onClick={() => { setSelBorrower(""); setLoanIdOvr(l.ref || l.id); }}
+                      className="w-full text-left px-4 py-3 flex items-center gap-3 active:bg-slate-50 transition">
+                      <Avatar name={l.borrower} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-slate-800 truncate">{l.borrower}</p>
+                        <p className="text-[11px] text-slate-400 truncate">{l.ref || l.id} · {fmt(l.amount)} · {l.frequency}</p>
+                      </div>
+                      <i data-lucide="chevron-right" className="w-4 h-4 text-slate-300 shrink-0"></i>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {resolved.loan && statusData && (
+          <div className="space-y-3 md:space-y-0 md:grid md:grid-cols-12 md:gap-4 md:items-start">
+
+            <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-3 md:col-span-5">
+              <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-3 min-w-0">
                   <Avatar name={resolved.loan.borrower} size="w-10 h-10" />
                   <div className="min-w-0">
@@ -3073,7 +3142,12 @@ function App() {
                     <p className="text-xs text-slate-500 tabular-nums">{fmt(resolved.loan.amount)} · {resolved.loan.terms} terms · {resolved.loan.flatRate}%</p>
                   </div>
                 </div>
-                <Badge s={statusData.overallStatus} />
+                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                  <Badge s={statusData.overallStatus} />
+                  <button onClick={clearLoan} className="text-[11px] font-semibold text-emerald-600 active:opacity-70 flex items-center gap-0.5">
+                    Change loan<i data-lucide="chevron-right" className="w-3 h-3"></i>
+                  </button>
+                </div>
               </div>
               {(() => { const tot = Number(resolved.loan.amount) + statusData.summedInterest; const pct = statusData.totalLogged / (tot || 1); return (
                 <div>
@@ -3081,6 +3155,14 @@ function App() {
                   <ProgressBar pct={pct} tone="emerald" />
                 </div>
               ); })()}
+
+              {/* What the four tiles at the foot of this screen used to say. They
+                  repeated the bar directly above and the schedule's Total row. */}
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 pt-3 border-t border-slate-50 text-[11px] text-slate-400">
+                <span>Interest <span className="font-semibold text-amber-600 tabular-nums">{fmt(statusData.summedInterest)}</span></span>
+                <span>Total due <span className="font-semibold text-slate-600 tabular-nums">{fmt(Number(resolved.loan.amount) + statusData.summedInterest)}</span></span>
+                <span>Paid <span className="font-semibold text-emerald-600 tabular-nums">{fmt(statusData.totalLogged)}</span></span>
+              </div>
 
               {/* Schedule terms + entry point to the revision sheet — one slim row
                   instead of a full card, since revising is a rare action. */}
@@ -3098,9 +3180,53 @@ function App() {
               </button>
             </div>
 
+            {/* ── What is actually due ── nextUnpaidRow already drives the
+                amount prefill; this is the same fact, finally said out loud. */}
+            {statusData.overallStatus === "FULLY PAID" ? (
+              <div className={`${cardCls} md:col-span-5 px-4 py-4 flex items-center gap-3`}>
+                <div className="w-9 h-9 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                  <i data-lucide="check" className="w-4 h-4"></i>
+                </div>
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800 text-sm">Loan settled</p>
+                  <p className="text-xs text-slate-400">Nothing left to collect on this one.</p>
+                </div>
+              </div>
+            ) : nextUnpaidRow && (() => {
+              const u = dueUrgency(isoDay(nextUnpaidRow.due));
+              const late = u.bucket === "overdue";
+              return (
+                <div className={`${cardCls} md:col-span-5 px-4 py-3.5`}>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Next payment due</p>
+                  <div className="mt-1.5 flex items-end justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className={`text-2xl font-bold tabular-nums leading-none ${late ? "text-red-600" : "text-slate-800"}`}>{fmt(nextUnpaidRow.amtLeft)}</p>
+                      <p className="mt-1.5 text-xs text-slate-400">
+                        Installment {nextUnpaidRow.period} of {statusData.rows.length} · {fmtDate(nextUnpaidRow.due)}
+                      </p>
+                    </div>
+                    {/* Word, icon and colour — the reading never rests on colour. */}
+                    <p className={`flex items-center gap-1 text-xs font-semibold shrink-0 ${late ? "text-red-600" : "text-slate-500"}`}>
+                      {late && <i data-lucide="alert-triangle" className="w-3.5 h-3.5"></i>}
+                      {u.label}
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Schedule */}
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-              <p className="px-4 py-3 font-semibold text-slate-800 border-b border-slate-100">Schedule & Status</p>
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden md:col-span-7">
+              <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between gap-3">
+                <p className="font-semibold text-slate-800">Schedule & Status</p>
+                {statusData.overallStatus !== "FULLY PAID" && (
+                  <button onClick={() => { buzz(); setPaySheetOpen(true); }}
+                    className="px-3 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0 transition">
+                    <i data-lucide="plus" className="w-3.5 h-3.5"></i>
+                    Log payment
+                  </button>
+                )}
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead><tr className="bg-slate-100 text-slate-500">
@@ -3132,56 +3258,42 @@ function App() {
               </div>
             </div>
 
-             {/* Log Payment */}
-            <div className="bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
-              <p className="font-semibold text-slate-800">Log a Payment</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Amount</label>
-                  <div className="relative">
-                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{sym}</span>
-                    <input type="number" inputMode="decimal" className={`${inputCls} pl-8`} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
-                  </div>
-                </div>
-                <div>
-                  <label className={labelCls}>Type</label>
-                  <select className={inputCls} value={payType} onChange={e => setPayType(e.target.value)}>
-                    <option>Standard</option><option>Minimum Due</option>
-                  </select>
-                </div>
+            {/* A record of what was collected — not part of the form, so it no
+                longer lives inside it. */}
+            <div className={`${cardCls} md:col-span-7`}>
+              <div className="px-4 py-3 border-b border-slate-100">
+                <CardHead title="Payments logged"
+                  hint={loanPayments.length ? `${loanPayments.length} on this loan · ${fmt(statusData.totalLogged)} collected` : undefined} />
               </div>
-              <div>
-                <label className={labelCls}>Date</label>
-                <input type="date" className={inputCls} value={payDate} onChange={e => setPayDate(e.target.value)} />
-              </div>
-              <button onClick={addPayment} className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm">Add Payment</button>
-
-              {loanPayments.length > 0 && (
-                <div className="space-y-1.5 pt-1">
+              {loanPayments.length === 0 ? (
+                <EmptyPanel icon="wallet" title="Nothing collected yet"
+                  body="Payments you log against this loan will be listed here." />
+              ) : (
+                <ul className="divide-y divide-slate-50">
                   {loanPayments.map(p => (
-                    <div key={p.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-xs ${p.pending ? "bg-amber-50 border border-amber-100" : "bg-slate-50"}`}>
-                      <span className="font-semibold">{fmt(p.amount)}</span>
-                      <span className="text-slate-500 flex items-center gap-1.5">
-                        {p.pending && <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold">Queued</span>}
+                    <li key={p.id} className={`flex items-center gap-3 px-4 py-2.5 ${p.pending ? "bg-amber-50" : ""}`}>
+                      <span className="font-semibold text-sm tabular-nums text-slate-800">{fmt(p.amount)}</span>
+                      <span className="flex-1 min-w-0 text-[11px] text-slate-400 truncate">
                         {p.type} · {fmtDate(parseDate(p.date))}
                       </span>
-                      <button onClick={() => deletePayment(p)} className="text-red-400 pl-2 text-base leading-none">×</button>
-                    </div>
+                      {p.pending && <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold shrink-0">Queued</span>}
+                      <button onClick={() => deletePayment(p)} aria-label={`Delete the ${fmt(p.amount)} payment from ${fmtDate(parseDate(p.date))}`}
+                        className="w-9 h-9 -mr-2 rounded-full flex items-center justify-center text-slate-300 active:bg-slate-100 active:text-red-500 transition shrink-0">
+                        <i data-lucide="trash-2" className="w-4 h-4"></i>
+                      </button>
+                    </li>
                   ))}
-                </div>
+                </ul>
               )}
             </div>
 
-             <div className="grid grid-cols-2 gap-3">
-              <Stat label="Total Interest" value={fmt(statusData.summedInterest)} tone="amber" />
-              <Stat label="Total Due" value={fmt(resolved.loan.amount + statusData.summedInterest)} tone="slate" />
-              <Stat label="Total Paid" value={fmt(statusData.totalLogged)} tone="emerald" />
-              <Stat label="Balance Left" value={fmt(statusData.grandLeft)} tone="teal" />
-            </div>
 
-          
+          </div>
+          )}
+
           </>)}
-        </>)}
+          </div>
+        )}
 
         {/* ── CASH FLOW ── */}
         {tab === "cashflow" && (
@@ -3921,6 +4033,74 @@ function App() {
 
       {/* ── Revise Remaining Schedule ── bottom sheet on phones, centered dialog on
           wider screens. Kept out of the Payments flow so the tab stays compact. */}
+      {/* ── Log a payment ── the form that used to sit at the foot of the
+          Payments tab, behind the sticky button. Same fields, same prefill. */}
+      {paySheetOpen && resolved.loan && statusData && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={() => setPaySheetOpen(false)}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Log a payment"
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[88vh] overflow-y-auto overscroll-contain scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800 truncate">Log a payment</p>
+                  <p className="text-xs text-slate-400 truncate">{resolved.loan.borrower} · {resolved.loan.ref || resolved.loan.id}</p>
+                </div>
+                <button onClick={() => setPaySheetOpen(false)} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+
+            <div className="px-5 py-4 space-y-3">
+              {nextUnpaidRow && (
+                <p className="text-xs text-slate-500">
+                  Installment {nextUnpaidRow.period} of {statusData.rows.length} is due
+                  {" "}<span className="font-semibold text-slate-700 tabular-nums">{fmt(nextUnpaidRow.amtLeft)}</span>
+                  {" "}on {fmtDate(nextUnpaidRow.due)}.
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Amount</label>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{sym}</span>
+                    <input type="number" inputMode="decimal" className={`${inputCls} pl-8`} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
+                  </div>
+                </div>
+                <div className="relative">
+                  <label className={`${labelCls} flex items-center gap-1`}>
+                    Type
+                    <button type="button" aria-label="What does Minimum Due mean?" aria-expanded={payInfo}
+                      onClick={e => { e.stopPropagation(); setPayInfo(v => !v); }}
+                      className="group inline-flex items-center justify-center w-5 h-5 -m-0.5 shrink-0 rounded-full text-slate-300 hover:text-slate-500 transition-colors">
+                      <i data-lucide="info" className="w-3.5 h-3.5"></i>
+                      <span role="tooltip"
+                        className={`pointer-events-none absolute left-0 right-0 top-full z-20 mt-1 rounded-lg bg-slate-900 px-2.5 py-2 text-left text-[11px] font-normal leading-snug text-white shadow-lg transition-opacity group-hover:opacity-100 ${payInfo ? "opacity-100" : "opacity-0"}`}>
+                        <b className="font-semibold">Standard</b> pays the whole installment.
+                        {" "}<b className="font-semibold">Minimum Due</b> pays the interest only — the principal carries
+                        forward and one extra installment is added to the schedule.
+                      </span>
+                    </button>
+                  </label>
+                  <select className={inputCls} value={payType} onChange={e => setPayType(e.target.value)}>
+                    <option>Standard</option><option>Minimum Due</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Date</label>
+                <input type="date" className={inputCls} value={payDate} onChange={e => setPayDate(e.target.value)} />
+              </div>
+              <button onClick={async () => { if (await addPayment()) setPaySheetOpen(false); }}
+                className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm transition">Add payment</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {reviseOpen && resolved.loan && statusData && (
         <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
           onClick={() => setReviseOpen(false)}>
