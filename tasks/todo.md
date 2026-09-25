@@ -138,3 +138,24 @@ row), but the passed period's interest is not collected — it is added to the n
   next ₱3,880 Sep 30) and without (installment 2 red "Overdue", ₱3,190). Dark and light mode render identical
   paper. Payments header at 360px: no overflow, title not truncated. esbuild parse OK.
 - **Known risks:** Not tried on a physical iPhone share sheet (same share path as the existing schedule image).
+
+# Payments: "Waived Interest" option
+
+- [x] Engine: payment type "Waived Interest" settles its installment on principal only; the row's interest (incl.
+      any passed onto it) becomes `waived`, total interest drops by that amount. Defers nothing, adds no row.
+- [x] Revision wrapper carries isWaived/waived; explicit re-price doesn't resurrect carried interest on a waived row
+- [x] Sheet: option + help text, amount prefilled with the principal, preview (principal, interest waived, short /
+      extra), same placement guard as Pass (part-paid / misaligned refused); toast + notification mention the waiver
+- [x] Schedule table: "~~₱690.00~~ waived"; status image: "₱690.00 interest waived"
+- [x] Server port mirrors it; sw.js → v31
+
+## Review
+
+- **Tests run:** no-waiver regression vs previous engine: 4,000 loans (Standard/Minimum Due/Pass), 0 differences.
+  App vs server: 6,000 loans (2,732 with waivers), 0 differences. Fuzz: 3,000 loans, 4,598 waivers + 3,446 passes
+  paid off exactly; each waiver lands on the due installment, marks it PAID, touches no other row; interest =
+  base + passed − waived within ₱0.02. Real-app harness (Cielo): Waived Interest prefilled ₱2,500.00, preview
+  "₱690.00 waived" (₱1,380.00 with her existing Pass), saved, screen alive, next due ₱3,090.00. esbuild OK.
+- **Known risks:** Not tried on a phone. A waiver placed by payment order (same as Pass/Minimum Due); a later edit to
+  earlier payments can move it. overdue-check needs a redeploy for waivers (else the server sees principal-only
+  and flags the interest as overdue). → DEPLOYED (user approved): overdue-check v10, verify_jwt=false, same layout.

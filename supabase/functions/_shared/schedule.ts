@@ -1,7 +1,8 @@
 // Server-side port of the app's amortization schedule engine (app.js).
 // Kept faithful to the client so "overdue" matches what staff see in the UI,
 // including the diminishing-interest model, centavo rounding, "Minimum Due" and
-// "Pass" deferral rows, and mid-stream frequency/term changes (freqChange).
+// "Pass" deferral rows, "Waived Interest" installments, and mid-stream
+// frequency/term changes (freqChange).
 //
 // Dates are built from Y/M/D components, so a row's calendar date is stable
 // regardless of the server timezone; callers compare against a date string in
@@ -25,7 +26,7 @@ export interface Pay { loanId: string; date: string; amount: number; type: strin
 export interface Row {
   remaining: number; principal: number; interest: number; total: number;
   due: Date; status: string; amtLeft: number; isExt: boolean;
-  isPass: boolean; passed: number; carried: number;
+  isPass: boolean; passed: number; carried: number; isWaived: boolean; waived: number;
 }
 
 export interface Status {
@@ -74,6 +75,8 @@ function dueDate(frequency: string, from: Date, i: number) {
 // Minimum Due pays that row's interest now; a Pass pays nothing and its
 // interest is added to the next installment.
 const DEFERS: Record<string, boolean> = { "Minimum Due": true, Pass: true };
+// Pays the installment's principal only; its interest (incl. any passed onto it) is forgiven.
+const WAIVED = "Waived Interest";
 
 // Oldest first; same-day entries in the order they were recorded (a payment's
 // type decides which installment it lands on, so ties can't be left to chance).
@@ -130,6 +133,7 @@ function computeStatusBase(loan: Loan, allPayments: Pay[]): Status {
     const payType = pays[step - 1] ? pays[step - 1].type : "Standard";
     const isExt = prevExt < extCount && !!DEFERS[payType];
     const isPass = isExt && payType === "Pass";
+    const isWaived = !isExt && payType === WAIVED;
     const schedMonth = step - prevExt;
     const prevRem = step === 1 ? pAmt : rows[step - 2].remaining - rows[step - 2].principal;
     // remCents goes negative when pAmt/terms rounds up — shave those centavos
@@ -142,18 +146,19 @@ function computeStatusBase(loan: Loan, allPayments: Pay[]): Status {
     const intRaw = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
     const intPaid = round2(intRaw + intCarry);
     intCarry += intRaw - intPaid;
-    let interest = intPaid, carried = 0, passed = 0;
+    let interest = intPaid, carried = 0, passed = 0, waived = 0;
     if (isPass) { passed = intPaid; passCarry = round2(passCarry + intPaid); interest = 0; }
     else if (passCarry) { carried = passCarry; interest = round2(intPaid + passCarry); passCarry = 0; }
+    if (isWaived) { waived = interest; interest = 0; }
     rows.push({ remaining: prevRem, principal: pPaid, interest, total: round2(pPaid + interest),
-      due: dueDate(loan.frequency, sd, step - 1), isExt, isPass, passed, carried });
+      due: dueDate(loan.frequency, sd, step - 1), isExt, isPass, passed, carried, isWaived, waived });
   }
   // A pass on the very last row keeps its interest rather than dropping it.
   if (passCarry && rows.length) {
     const last = rows[rows.length - 1];
     last.carried = round2(last.carried + passCarry);
-    last.interest = round2(last.interest + passCarry);
-    last.total = round2(last.total + passCarry);
+    if (last.isWaived) last.waived = round2(last.waived + passCarry);
+    else { last.interest = round2(last.interest + passCarry); last.total = round2(last.total + passCarry); }
   }
   return totals(pAmt, settleRows(rows, totalLogged), totalLogged);
 }
@@ -174,7 +179,7 @@ export function computeStatus(loan: Loan, allPayments: Pay[]): Status {
     : Math.max(1, Math.round(after.length * freqMult(loan.frequency) / freqMult(F1)));
   const remI = explicitTerms ? remP * rate * n * freqMult(F1) : after.reduce((s, r) => s + r.interest, 0);
   // Passed interest riding on a re-priced installment moves to the first new one.
-  const carryIn = explicitTerms ? round2(after.reduce((s, r) => s + (r.carried || 0), 0)) : 0;
+  const carryIn = explicitTerms ? round2(after.reduce((s, r) => s + (r.isWaived ? 0 : (r.carried || 0)), 0)) : 0;
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const avgI = remI / n, dropR = (remP * drop) / n;
   const combined: Draft[] = kept.map(({ status: _s, amtLeft: _a, ...r }) => r);
@@ -185,7 +190,7 @@ export function computeStatus(loan: Loan, allPayments: Pay[]): Status {
     const iv = round2(iRaw + remCarry); remCarry += iRaw - iv;
     const carried = i === 0 ? carryIn : 0;
     combined.push({ remaining: 0, principal: p, interest: round2(iv + carried), total: 0,
-      due: dueDate(F1, D, i), isExt: false, isPass: false, passed: 0, carried });
+      due: dueDate(F1, D, i), isExt: false, isPass: false, passed: 0, carried, isWaived: false, waived: 0 });
   }
   let prevRem = pAmt;
   for (const r of combined) {
