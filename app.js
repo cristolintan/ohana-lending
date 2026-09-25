@@ -35,6 +35,38 @@ const greeting = () => { const h = new Date().getHours(); return h < 12 ? "Good 
 const firstName = email => { const s = (email || "").split("@")[0].split(/[._\-0-9]/)[0]; return s ? s[0].toUpperCase() + s.slice(1) : ""; };
 const buzz = (ms = 12) => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch {} };
 
+// Lucide's createIcons() *replaces* each <i data-lucide> with an <svg>, pulling
+// the node React rendered out from under it. React still holds that <i>: the
+// moment it removes one (the "overdue" warning clearing after a payment) or
+// inserts a sibling before one, the DOM call throws NotFoundError and React
+// unmounts the whole app — a black screen until reload. So the <i> is never
+// replaced: a throwaway placeholder goes *inside* it and Lucide swaps that. The
+// <i> is display:contents (index.html), so the svg lays out exactly as when it
+// stood alone. Runs after every render but only repaints an icon whose name,
+// class or style changed — so data-driven icons (trend arrows, the active tab's
+// stroke) now actually update, which they never did when the <i> was gone.
+function paintIcons() {
+  if (!window.lucide) return;
+  let painted = false;
+  document.querySelectorAll("i[data-lucide]").forEach(el => {
+    const name = el.getAttribute("data-lucide"), cls = el.getAttribute("class") || "", style = el.getAttribute("style") || "";
+    const sig = `${name}|${cls}|${style}`;
+    if (el.dataset.painted === sig && el.firstElementChild) return;
+    const ph = document.createElement("i");
+    ph.setAttribute("data-icon-src", name);
+    if (cls) ph.setAttribute("class", cls);
+    if (style) ph.setAttribute("style", style);
+    el.replaceChildren(ph);
+    el.dataset.painted = sig;
+    painted = true;
+  });
+  if (!painted) return;
+  lucide.createIcons({ icons: lucide.icons, nameAttr: "data-icon-src" });
+  // Lucide copies the placeholder's attributes onto the svg; drop the marker so
+  // the next pass doesn't re-create every icon on the page.
+  document.querySelectorAll("svg[data-icon-src]").forEach(s => s.removeAttribute("data-icon-src"));
+}
+
 function pesoWords(n) {
   n = Math.floor(Number(n) || 0);
   if (n <= 0) return "ZERO PESOS";
@@ -2783,7 +2815,7 @@ function App() {
     }
   };
   // Keep Lucide icons rendered across tab switches / re-renders
-  useEffect(() => { if (window.lucide) lucide.createIcons(); });
+  useEffect(() => { paintIcons(); });
 
   // ── Bottom nav ── four primary destinations, split around a center FAB
   // (New Loan). Queue / Agreement / Status detail are reached contextually.
@@ -4843,4 +4875,4 @@ function App() {
 // Init Lucide icons after render
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(React.createElement(App));
-setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 300);
+setTimeout(paintIcons, 300);
