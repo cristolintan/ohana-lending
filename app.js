@@ -3666,18 +3666,18 @@ function App() {
                     <table className="w-full text-sm">
                       <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
                         <tr>
-                          <th scope="col" className="text-left font-semibold px-4 py-2">Member</th>
+                          <th scope="col" className="text-left font-semibold pl-3 pr-2 sm:px-4 py-2">Member</th>
                           <th scope="col" className="hidden sm:table-cell text-right font-semibold px-3 py-2">Capital</th>
                           <th scope="col" className="hidden md:table-cell text-right font-semibold px-3 py-2">Cash</th>
                           <th scope="col" className="hidden md:table-cell text-right font-semibold px-3 py-2">Principal</th>
-                          <th scope="col" className="text-right font-semibold px-3 py-2">Value today</th>
-                          <th scope="col" className="text-right font-semibold px-4 py-2">{coop.gain >= 0 ? "Gain" : "Gain / loss"}</th>
+                          <th scope="col" className="text-right font-semibold px-2 sm:px-3 py-2">Value today</th>
+                          <th scope="col" className="text-right font-semibold pl-2 pr-3 sm:px-4 py-2">{coop.gain >= 0 ? "Gain" : "Gain / loss"}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-50">
                         {coop.rows.map(r => (
                           <tr key={r.id || r.name}>
-                            <td className="px-4 py-2.5 max-w-[9rem] sm:max-w-none">
+                            <td className="pl-3 pr-2 sm:px-4 py-2.5 max-w-[8rem] sm:max-w-none">
                               <div className="flex items-center gap-2.5 min-w-0">
                                 <span className="hidden sm:flex"><Avatar name={r.name} size="w-8 h-8" /></span>
                                 <div className="min-w-0">
@@ -3691,8 +3691,8 @@ function App() {
                             <td className="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums text-slate-500">{fmt(r.capital)}</td>
                             <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-slate-500">{fmt(r.cash)}</td>
                             <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-slate-500">{fmt(r.principal)}</td>
-                            <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-800 whitespace-nowrap">{fmt(r.value)}</td>
-                            <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                            <td className="px-2 sm:px-3 py-2.5 text-right tabular-nums font-bold text-slate-800 whitespace-nowrap">{fmt(r.value)}</td>
+                            <td className="pl-2 pr-3 sm:px-4 py-2.5 text-right whitespace-nowrap">
                               <p className={`tabular-nums font-semibold ${r.gain >= 0 ? "text-emerald-700" : "text-red-600"}`}>{r.gain >= 0 ? "+" : "−"}{fmt(Math.abs(r.gain))}</p>
                               <p className={`text-[11px] tabular-nums ${r.gain >= 0 ? "text-emerald-600" : "text-red-500"}`}>{r.gain >= 0 ? "+" : "−"}{Math.abs(r.pct).toFixed(1)}%</p>
                             </td>
@@ -3701,12 +3701,12 @@ function App() {
                       </tbody>
                       <tfoot className="border-t border-slate-100 bg-slate-50/60">
                         <tr>
-                          <th scope="row" className="text-left px-4 py-2.5 text-xs font-semibold text-slate-600">Total</th>
+                          <th scope="row" className="text-left pl-3 pr-2 sm:px-4 py-2.5 text-xs font-semibold text-slate-600">Total</th>
                           <td className="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums text-xs font-semibold text-slate-600">{fmt(coop.capital)}</td>
                           <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-xs font-semibold text-slate-600">{fmt(coop.cash)}</td>
                           <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-xs font-semibold text-slate-600">{fmt(coop.principal)}</td>
-                          <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-800 whitespace-nowrap">{fmt(coop.value)}</td>
-                          <td className={`px-4 py-2.5 text-right tabular-nums font-semibold whitespace-nowrap ${coop.gain >= 0 ? "text-emerald-700" : "text-red-600"}`}>{coop.gain >= 0 ? "+" : "−"}{fmt(Math.abs(coop.gain))}</td>
+                          <td className="px-2 sm:px-3 py-2.5 text-right tabular-nums font-bold text-slate-800 whitespace-nowrap">{fmt(coop.value)}</td>
+                          <td className={`pl-2 pr-3 sm:px-4 py-2.5 text-right tabular-nums font-semibold whitespace-nowrap ${coop.gain >= 0 ? "text-emerald-700" : "text-red-600"}`}>{coop.gain >= 0 ? "+" : "−"}{fmt(Math.abs(coop.gain))}</td>
                         </tr>
                       </tfoot>
                     </table>
