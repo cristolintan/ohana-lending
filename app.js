@@ -209,7 +209,9 @@ async function ensureSession() {
 
 // Row → app-shape mappers (snake_case DB ↔ camelCase app)
 const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r.amount, terms: r.terms,
-  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null, idImage: r.id_image || null });
+  flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date,
+  // Older loans have no release_date: they were released on their start date.
+  releaseDate: r.release_date || r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null, idImage: r.id_image || null });
 const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
 const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
 const rowToQueue = r => ({ id: r.id, borrower: r.borrower, amount: +r.amount, date: r.queue_date, note: r.note || "", status: r.status, createdAt: r.created_at });
@@ -248,12 +250,14 @@ const api = {
   },
   async createLoan(l) {
     const { data, error } = await sb.from("loans").insert({ ref: l.ref, borrower: l.borrower, amount: l.amount,
-      terms: l.terms, flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate }).select().single();
+      terms: l.terms, flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate,
+      release_date: l.releaseDate || l.startDate }).select().single();
     if (error) throw error; return rowToLoan(data);
   },
   async updateLoan(id, l) {
     const { error } = await sb.from("loans").update({ borrower: l.borrower, amount: l.amount, terms: l.terms,
-      flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate }).eq("id", id);
+      flat_rate: l.flatRate, drop_rate: l.dropRate, frequency: l.frequency, start_date: l.startDate,
+      release_date: l.releaseDate || l.startDate }).eq("id", id);
     if (error) throw error;
   },
   async deleteLoan(id) { const { error } = await sb.from("loans").delete().eq("id", id); if (error) throw error; },
@@ -1354,7 +1358,8 @@ function App() {
   const [terms, setTerms] = useState(6);
   const [flatRate, setFlatRate] = useState(3.6);
   const [frequency, setFrequency] = useState("Semi-Monthly");
-  const [startDate, setStartDate] = useState(today());
+  const [startDate, setStartDate] = useState(today());     // first payment due
+  const [releaseDate, setReleaseDate] = useState(today()); // money handed over
   const [dropRate, setDropRate] = useState(3.6);
   const [editId, setEditId] = useState(null);
 
@@ -1590,7 +1595,7 @@ function App() {
 
   const calc = useMemo(() => computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }), [amount, terms, flatRate, frequency, startDate, dropRate]);
 
-  const resetForm = () => { setEditId(null); setFundingQueueId(null); setName(""); setAmount(10000); setTerms(6); setFlatRate(3.6); setFrequency("Semi-Monthly"); setStartDate(today()); setDropRate(3.6); };
+  const resetForm = () => { setEditId(null); setFundingQueueId(null); setName(""); setAmount(10000); setTerms(6); setFlatRate(3.6); setFrequency("Semi-Monthly"); setStartDate(today()); setReleaseDate(today()); setDropRate(3.6); };
 
   // A loan card is a link to its Payments screen.
   const openPayments = l => {
@@ -1668,6 +1673,7 @@ function App() {
     setDropRate(l.dropRate != null ? l.dropRate : l.flatRate);
     setFrequency(l.frequency);
     setStartDate(l.startDate);
+    setReleaseDate(l.releaseDate || l.startDate);
     setTab("new");
   };
 
@@ -1679,17 +1685,19 @@ function App() {
     if (!(trm > 0)) { flash("Terms must be greater than 0."); return; }
     if (trm > 120) { flash("Terms looks too high (max 120)."); return; }
     if (rate < 0 || drop < 0) { flash("Rates can't be negative."); return; }
+    if (!releaseDate) { flash("Pick the release date."); return; }
     if (!startDate) { flash("Pick a start date."); return; }
+    if (startDate < releaseDate) { flash("Start date (first payment) can't be before the release date."); return; }
     const hasActive = db.loans.some(l => l.id !== editId && l.borrower.toLowerCase() === borrower.toLowerCase() && computeStatus(l, db.payments).overallStatus !== "FULLY PAID");
     if (hasActive) { flash(`${borrower} already has an active loan.`); return; }
     try {
       if (editId) {
-        await api.updateLoan(editId, { borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate });
+        await api.updateLoan(editId, { borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate, releaseDate });
         flash(`Updated — ${borrower}`);
       } else {
         const nums = db.loans.map(l => parseInt((l.ref || "").split("-")[1], 10)).filter(x => !isNaN(x));
         const ref = "OL-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
-        await api.createLoan({ ref, borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate });
+        await api.createLoan({ ref, borrower, amount: amt, terms: trm, flatRate: rate, dropRate: drop, frequency, startDate, releaseDate });
         // Mark the queued borrower funded — only if this loan really is for them.
         if (fundingQueueId) {
           const fq = (db.queue || []).find(q => q.id === fundingQueueId);
@@ -1738,7 +1746,7 @@ function App() {
       const idMap = {};
       for (const l of loans) {
         const created = await api.createLoan({ ref: l.id, borrower: l.borrower, amount: l.amount, terms: l.terms,
-          flatRate: l.flatRate, dropRate: l.dropRate != null ? l.dropRate : l.flatRate, frequency: l.frequency, startDate: l.startDate });
+          flatRate: l.flatRate, dropRate: l.dropRate != null ? l.dropRate : l.flatRate, frequency: l.frequency, startDate: l.startDate, releaseDate: l.releaseDate || l.startDate });
         idMap[l.id] = created.id;
         if (l.agreement) await api.saveAgreement(created.id, l.agreement);
       }
@@ -1889,7 +1897,7 @@ function App() {
     const todayStr = isoDay(new Date()), curMonth = todayStr.slice(0, 7);
 
     // Actual cash events: disbursements (out), collections (in), manual entries (in/out).
-    const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
+    const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.releaseDate || l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
     const coll = db.payments.map(p => {
       const loan = db.loans.find(l => l.id === p.loanId);
       return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, ref: loan ? loan.ref : "", borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
@@ -2248,6 +2256,7 @@ function App() {
     setDropRate(3.6);
     setFrequency("Semi-Monthly");
     setStartDate(today());
+    setReleaseDate(today());
     setFundingQueueId(entry.id);
     setTab("new");
     flash(`Funding ${entry.borrower} — review and save the loan.`);
@@ -2890,9 +2899,16 @@ function App() {
                 {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
               </select>
             </div>
-            <div className="col-span-2">
-              <label className={labelCls}>Start Date</label>
-              <input type="date" className={inputCls} value={startDate} onChange={e => setStartDate(e.target.value)} />
+            {/* Two different days: the release is when the borrower gets the
+                cash (it drives cash flow); the start date is the first payment
+                due, which the whole schedule counts from. */}
+            <div>
+              <label className={labelCls}>Release Date</label>
+              <input type="date" className={inputCls} value={releaseDate} onChange={e => setReleaseDate(e.target.value)} />
+            </div>
+            <div>
+              <label className={labelCls}>Start Date <span className="normal-case font-normal text-slate-400">· 1st payment</span></label>
+              <input type="date" className={inputCls} value={startDate} min={releaseDate || undefined} onChange={e => setStartDate(e.target.value)} />
             </div>
             </div>
 
@@ -3911,7 +3927,9 @@ function App() {
             <p className="text-[13px] font-bold tracking-[0.18em] text-emerald-600">PAYMENT SCHEDULE</p>
             <p className="mt-1 text-3xl font-bold text-slate-900 leading-tight">{name.trim() || "Unnamed borrower"}</p>
             <p className="mt-2 text-[15px] text-slate-500">
-              Release date <span className="text-lg font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
+              Release date <span className="text-lg font-semibold text-slate-700">{fmtDate(parseDate(releaseDate))}</span>
+              <span className="text-slate-300"> · </span>
+              Start date <span className="text-lg font-semibold text-slate-700">{fmtDate(parseDate(startDate))}</span>
               <span className="text-slate-300"> · </span>
               {Math.floor(Number(terms) || 0)} {frequency.toLowerCase()} payments
               <span className="text-slate-300"> · </span>
