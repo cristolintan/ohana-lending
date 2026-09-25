@@ -351,7 +351,13 @@ function computeStatusBase(loan, allPayments) {
   const remCents = Math.round(round2(pAmt - baseP * terms) * 100);
   const avgInterest = totalInterest / terms;
   const sd = parseDate(loan.startDate);
-  const rows = []; let cumDue = 0;
+  // Interest is carried to the centavo like principal already is. The raw
+  // diminishing figure repeats (5,000 over 3 weekly gives 1,874.99333...), and
+  // money can only be paid to two decimals, so an unrounded schedule can never
+  // be settled exactly. `intCarry` hands the shaved fraction to the next
+  // installment, so every row is a real amount and the column still sums to
+  // the quoted total interest.
+  const rows = []; let cumDue = 0, intCarry = 0;
   for (let step = 1; step <= totalRows; step++) {
     const prevExt = rows.filter(r => r.principal === 0).length;
     const payType = pays[step - 1] ? pays[step - 1].type : "Standard";
@@ -367,18 +373,27 @@ function computeStatusBase(loan, allPayments) {
       : (schedMonth <= -remCents ? round2(baseP - 0.01) : baseP);
     const ratio = (pAmt - prevRem) / pAmt;
     const tier = Math.min(terms, 1 + Math.round(ratio * terms));
-    const intPaid = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
-    const totPay = pPaid + intPaid;
+    const intRaw = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
+    const intPaid = round2(intRaw + intCarry);
+    intCarry += intRaw - intPaid;
+    const totPay = round2(pPaid + intPaid);
     const due = dueDate(loan.frequency, sd, step - 1);
     cumDue += totPay;
-    const status = totalLogged >= cumDue ? "PAID" : totalLogged > cumDue - totPay ? "PARTIAL" : "UNPAID";
-    const amtLeft = Math.max(0, totPay - Math.max(0, totalLogged - (cumDue - totPay)));
+    // Compared in whole centavos. Every amount above is now rounded to two
+    // decimals, but 0.01 has no exact binary form, so summing them still
+    // drifts by fractions of a centavo — enough for a fully-paid installment
+    // to miss a `>=` test and read PARTIAL with "Left ₱0.00". Integers settle
+    // it exactly, with no tolerance to tune.
+    const cDue = Math.round(cumDue * 100), cLogged = Math.round(totalLogged * 100), cRow = Math.round(totPay * 100);
+    const cLeft = Math.max(0, cRow - Math.max(0, cLogged - (cDue - cRow)));
+    const amtLeft = cLeft / 100;
+    const status = cLeft <= 0 ? "PAID" : cLeft < cRow ? "PARTIAL" : "UNPAID";
     rows.push({ period: isExt ? `${schedMonth} (Ext)` : String(schedMonth), remaining: prevRem, principal: pPaid, interest: intPaid, total: totPay, due, status, amtLeft, isExt });
   }
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
-  const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
-  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0.005 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
+  const grandLeft = Math.max(0, Math.round((pAmt + summedInterest) * 100) - Math.round(totalLogged * 100)) / 100;
+  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
 // Wraps the schedule engine. If the loan has a mid-stream frequency change
@@ -408,13 +423,14 @@ function computeStatus(loan, allPayments) {
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const avgI = remI / n, dropR = (remP * drop) / n;   // diminishing model, scaled to the remainder
   const rem = [];
+  let remCarry = 0, remPCarry = 0;
   for (let i = 0; i < n; i++) {
-    rem.push({
-      principal: remP / n,
-      interest: avgI + ((n + 1) / 2 - (i + 1)) * dropR,
-      due: dueDate(F1, D, i),
-      isSwitched: true,
-    });
+    // Same centavo discipline as the original schedule: a re-spaced
+    // installment has to be an amount somebody can actually hand over.
+    const pRaw = remP / n, iRaw = avgI + ((n + 1) / 2 - (i + 1)) * dropR;
+    const p = round2(pRaw + remPCarry); remPCarry += pRaw - p;
+    const iv = round2(iRaw + remCarry); remCarry += iRaw - iv;
+    rem.push({ principal: p, interest: iv, due: dueDate(F1, D, i), isSwitched: true });
   }
   const combined = [
     ...kept.map(r => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt })),
@@ -422,18 +438,25 @@ function computeStatus(loan, allPayments) {
   ];
   let prevRem = pAmt, cumDue = 0; const rows = [];
   combined.forEach((r, i) => {
-    const remaining = prevRem, total = r.principal + r.interest;
+    const remaining = prevRem, total = round2(r.principal + r.interest);
     cumDue += total;
-    const status = totalLogged >= cumDue ? "PAID" : totalLogged > cumDue - total ? "PARTIAL" : "UNPAID";
-    const amtLeft = Math.max(0, total - Math.max(0, totalLogged - (cumDue - total)));
+    // Compared in whole centavos. Every amount above is now rounded to two
+    // decimals, but 0.01 has no exact binary form, so summing them still
+    // drifts by fractions of a centavo — enough for a fully-paid installment
+    // to miss a `>=` test and read PARTIAL with "Left ₱0.00". Integers settle
+    // it exactly, with no tolerance to tune.
+    const cDue = Math.round(cumDue * 100), cLogged = Math.round(totalLogged * 100), cRow = Math.round(total * 100);
+    const cLeft = Math.max(0, cRow - Math.max(0, cLogged - (cDue - cRow)));
+    const amtLeft = cLeft / 100;
+    const status = cLeft <= 0 ? "PAID" : cLeft < cRow ? "PARTIAL" : "UNPAID";
     rows.push({ period: r.isExt ? `${i + 1} (Ext)` : String(i + 1), remaining, principal: r.principal, interest: r.interest, total, due: r.due, status, amtLeft, isExt: !!r.isExt, switched: !!r.isSwitched });
     prevRem = remaining - r.principal;
   });
   // Totals are recomputed from the revised rows (a term change moves the interest).
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
-  const grandLeft = Math.max(0, pAmt + summedInterest - totalLogged);
-  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0.005 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
+  const grandLeft = Math.max(0, Math.round((pAmt + summedInterest) * 100) - Math.round(totalLogged * 100)) / 100;
+  return { rows, summedInterest, summedTotal, grandLeft, overallStatus: grandLeft <= 0 ? "FULLY PAID" : "ACTIVE BALANCE", totalLogged };
 }
 
 // ─── Cash flow helpers ─────────────────────────────────────────────────────────
@@ -1571,7 +1594,7 @@ function App() {
 
   // A loan card is a link to its Payments screen.
   const openPayments = l => {
-    setLoanIdOvr(l.ref || l.id);   // `resolved` matches on either
+    setLoanIdOvr(l.id);   // by id: refs repeat across users (see `resolved`)
     setSelBorrower("");
     setSheetLoanId(null);
     setTab("status");
@@ -2280,7 +2303,7 @@ function App() {
   useEffect(() => {
     if (!pendingLoanRef || !db.loans.length) return;
     const l = db.loans.find(x => x.ref === pendingLoanRef);
-    if (l) { setLoanIdOvr(l.ref); setSelBorrower(""); setTab("status"); }
+    if (l) { setLoanIdOvr(pendingLoanRef); setSelBorrower(""); setTab("status"); }
     setPendingLoanRef(null);
     try { history.replaceState(null, "", location.pathname); } catch {}
   }, [pendingLoanRef, db.loans]);
@@ -2375,8 +2398,15 @@ function App() {
     const q = raw.toLowerCase();
     // An exact id or ref wins outright — that is what a tap-through from Home
     // or Loans writes, and it must land on one loan even if a name also matches.
-    const exact = db.loans.find(l => l.id === raw || (l.ref || "").toLowerCase() === q);
-    if (exact) return { loan: exact };
+    // Refs are only unique per user, so an admin (who reads every user's
+    // loans) can hold two OL-0001s. Taking the first ref match there opened —
+    // and logged payments against — the wrong borrower. Tap-throughs pass the
+    // id; a typed ref that is shared falls through to the choice list.
+    const byId = db.loans.find(l => l.id === raw);
+    if (byId) return { loan: byId };
+    const exact = db.loans.filter(l => (l.ref || "").toLowerCase() === q);
+    if (exact.length === 1) return { loan: exact[0] };
+    if (exact.length > 1) return { choices: exact };
     const hits = db.loans.filter(l =>
       (l.borrower || "").toLowerCase().includes(q) || (l.ref || "").toLowerCase().includes(q));
     if (!hits.length) return { error: `No loan matches “${raw}”.` };
@@ -2722,7 +2752,7 @@ function App() {
                       <ul className="divide-y divide-slate-50">
                         {rows.map(r => (
                           <li key={r.loanId}>
-                            <button onClick={() => { setLoanIdOvr(r.ref); setSelBorrower(""); setTab("status"); }}
+                            <button onClick={() => { setLoanIdOvr(r.loanId); setSelBorrower(""); setTab("status"); }}
                               className="w-full text-left px-4 py-2.5 flex items-center gap-3 active:bg-slate-50 transition">
                               <Avatar name={r.borrower} />
                               <div className="min-w-0 flex-1">
@@ -3114,7 +3144,7 @@ function App() {
               <ul className="divide-y divide-slate-50">
                 {resolved.choices.map(l => (
                   <li key={l.id}>
-                    <button onClick={() => { setSelBorrower(""); setLoanIdOvr(l.ref || l.id); }}
+                    <button onClick={() => { setSelBorrower(""); setLoanIdOvr(l.id); }}
                       className="w-full text-left px-4 py-3 flex items-center gap-3 active:bg-slate-50 transition">
                       <Avatar name={l.borrower} />
                       <div className="min-w-0 flex-1">
@@ -3661,7 +3691,7 @@ function App() {
                             const isIn = t.inflow > 0;
                             return (
                               <li key={t.id}>
-                                <div onClick={() => { if (t.ref) { setLoanIdOvr(t.ref); setSelBorrower(""); setTab("status"); } }}
+                                <div onClick={() => { if (t.loanId) { setLoanIdOvr(t.loanId); setSelBorrower(""); setTab("status"); } }}
                                   className={`px-4 py-2.5 flex items-center gap-3 ${t.ref ? "cursor-pointer active:bg-slate-50" : ""} transition`}>
                                   <span className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
                                     t.projected ? "bg-slate-100 text-slate-400" : isIn ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}>
