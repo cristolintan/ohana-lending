@@ -66,3 +66,12 @@
   admin's own opening balance (cash shows −₱132,757), so the members card is only meaningful on the co-op's own book.
   Withdrawals reduce everyone's value; if a withdrawal was a capital return, members' capital should be lowered.
 - **Follow-up:** Decide which account is the co-op book; commit + push; set up members on that account.
+
+# Bug: can't type member names
+
+- **Cause:** member row was a flex row; `inputCls` carries `w-full`, which outranks the added `w-28` in Tailwind's
+  output, so the `shrink-0` capital box took the full width and the name box collapsed to 30px (its padding).
+  No settings writes ever reached the API (edge logs: GETs only).
+- **Fix:** editor header + rows use `grid-cols-[minmax(0,1fr)_7rem_2.25rem]`; also tightened mobile table padding.
+- **Verified (headless Chrome, 360px):** name box 30px → 156px, capital 320px → 112px; members table 344px → 326px
+  (fits a 360px phone; a 320px phone scrolls inside the card). esbuild parse OK. sw.js → v27.
