@@ -35,13 +35,13 @@ Deno.serve(async (req) => {
 
   const [loansRes, paysRes] = await Promise.all([
     admin.from("loans").select("*"),
-    admin.from("payments").select("loan_id,date,amount,type"),
+    admin.from("payments").select("loan_id,date,amount,type,created_at"),
   ]);
   if (loansRes.error) return new Response(loansRes.error.message, { status: 500 });
   if (paysRes.error) return new Response(paysRes.error.message, { status: 500 });
 
   const pays: Pay[] = (paysRes.data || []).map((p) => ({
-    loanId: p.loan_id, date: p.date, amount: +p.amount, type: p.type,
+    loanId: p.loan_id, date: p.date, amount: +p.amount, type: p.type, createdAt: p.created_at,
   }));
   const todayStr = manilaToday();
 
