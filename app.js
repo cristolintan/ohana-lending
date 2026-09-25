@@ -4605,17 +4605,20 @@ function App() {
               </div>
             </div>
             <div className="px-5 py-4 space-y-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
-                <span className="flex-1">Name</span>
-                <span className="w-28 shrink-0 text-right">Capital</span>
-                <span className="w-9 shrink-0"></span>
+              {/* A grid, not flex: inputCls carries w-full, which outranks a
+                  w-28 in Tailwind's output — in a flex row the capital box took
+                  the whole width and squeezed the name box to a 30px sliver. */}
+              <div className="grid grid-cols-[minmax(0,1fr)_7rem_2.25rem] gap-2 text-xs font-medium text-slate-500">
+                <span>Name</span>
+                <span className="text-right">Capital</span>
+                <span></span>
               </div>
               <div className="space-y-2">
                 {memberDraft.map((m, i) => (
-                  <div key={m.id} className="flex items-center gap-2">
-                    <input className={`${inputCls} flex-1 min-w-0`} value={m.name} placeholder={`Member ${i + 1}`}
+                  <div key={m.id} className="grid grid-cols-[minmax(0,1fr)_7rem_2.25rem] items-center gap-2">
+                    <input className={inputCls} value={m.name} placeholder={`Member ${i + 1}`} autoCapitalize="words"
                       aria-label={`Member ${i + 1} name`} onChange={e => editMember(m.id, { name: e.target.value })} />
-                    <input type="number" inputMode="decimal" className={`${inputCls} w-28 shrink-0 text-right`} value={m.capital}
+                    <input type="number" inputMode="decimal" className={`${inputCls} text-right`} value={m.capital}
                       aria-label={`Member ${i + 1} capital`} onChange={e => editMember(m.id, { capital: e.target.value })} />
                     <button onClick={() => setMemberDraft(d => d.filter(x => x.id !== m.id))} aria-label={`Remove member ${i + 1}`}
                       className="w-9 h-9 shrink-0 rounded-xl text-slate-400 flex items-center justify-center active:bg-slate-100 transition">
