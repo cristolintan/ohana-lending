@@ -75,3 +75,35 @@
 - **Fix:** editor header + rows use `grid-cols-[minmax(0,1fr)_7rem_2.25rem]`; also tightened mobile table padding.
 - **Verified (headless Chrome, 360px):** name box 30px → 156px, capital 320px → 112px; members table 344px → 326px
   (fits a 360px phone; a 320px phone scrolls inside the card). esbuild parse OK. sw.js → v27.
+
+# Payments: "Pass" option
+
+Pass = borrower pays nothing this period. Like Minimum Due, the principal is deferred one period (schedule gains one
+row), but the passed period's interest is not collected — it is added to the next installment.
+
+- [x] DB: payments amount check → `amount > 0 or (type = 'Pass' and amount = 0)`
+- [x] Engine (app.js): Pass creates a deferral row (principal 0, interest 0, status PASSED); its interest carries
+      into the next non-pass row (`carried`); settle statuses in one shared centavo pass (`settleRows`)
+- [x] Revision wrapper keeps isPass/carried; explicit-term re-price keeps carried interest
+- [x] UI: Type select gets Pass (amount locked to 0, explainer), schedule row "n (Pass)", "incl. ₱x passed",
+      PASSED badge, history shows Pass, notification text, cash flow ignores ₱0 passes
+- [x] Overdue count uses amtLeft (PASSED must not count as overdue)
+- [x] Server port (_shared/schedule.ts): same engine incl. centavo fix + Pass; deploy overdue-check (ask first)
+- [x] Tests: engine replay + fuzz; esbuild parse; sw bump
+- [x] Also: payments sort by date then created_at (`byPaidOrder`) — same-day order used to be arbitrary, which
+      could put a Pass/Minimum Due on the wrong installment; last-payment date and collections ignore ₱0 passes
+
+## Review
+
+- **Summary:** Pass = ₱0 payment row of type "Pass". Engine adds a deferral row (PASSED, owes nothing); that period's
+  interest is added to the next installment ("incl. ₱x passed"). Sheet shows a live preview (interest moved, new next
+  payment) computed by the engine and blocks a pass on a part-paid or misaligned installment.
+- **Files changed:** app.js, sw.js (v28), supabase/functions/_shared/schedule.ts, supabase/functions/overdue-check/index.ts;
+  DB constraint `payments_amount_check` (applied live).
+- **Tests run:** no-Pass regression vs previous engine: 4,000 loans, 0 differences. App vs server port parity: 6,000 loans
+  (3,058 with passes, payments shuffled): 0 differences. Pass fuzz: 3,000 loans / 6,637 passes paid off exactly, every
+  pass on the due installment, carried = passed interest, no false PARTIAL; interest drift vs base ≤ ₱0.03.
+  Centavo fuzz still 0 failures. esbuild parse (app + edge bundle) OK.
+- **Known risks:** Not clicked through in a browser. Placement is by payment order (same as Minimum Due) — the sheet
+  refuses a pass it can't place. overdue-check must be redeployed or the server treats a Pass as ₱0 Standard and
+  sends an overdue alert for the passed installment. → DEPLOYED (user approved): overdue-check v9, verify_jwt=false (unchanged), same file layout; not invoked manually (would send real pushes).

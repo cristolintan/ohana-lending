@@ -212,7 +212,7 @@ const rowToLoan = r => ({ id: r.id, ref: r.ref, borrower: r.borrower, amount: +r
   flatRate: +r.flat_rate, dropRate: +r.drop_rate, frequency: r.frequency, startDate: r.start_date,
   // Older loans have no release_date: they were released on their start date.
   releaseDate: r.release_date || r.start_date, createdAt: r.created_at, freqChange: r.freq_change || null, idImage: r.id_image || null });
-const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type });
+const rowToPay = r => ({ id: r.id, loanId: r.loan_id, date: r.date, amount: +r.amount, type: r.type, createdAt: r.created_at });
 const rowToTx  = r => ({ id: r.id, date: r.date, kind: r.kind, direction: r.direction, amount: +r.amount, note: r.note || "" });
 const rowToQueue = r => ({ id: r.id, borrower: r.borrower, amount: +r.amount, date: r.queue_date, note: r.note || "", status: r.status, createdAt: r.created_at });
 
@@ -352,15 +352,48 @@ function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }
   return { rows: st.rows, totalInterest: st.summedInterest, totalRepay: pAmt + st.summedInterest };
 }
 
+// Payment types that push the principal back one period and add a row to the
+// schedule. Minimum Due pays that row's interest now; a Pass pays nothing, and
+// the row's interest is added to the next installment instead.
+const DEFERS = { "Minimum Due": true, Pass: true };
+
+// Oldest first; same-day entries in the order they were recorded. Each
+// payment's type decides which installment it lands on, so ties can't be left
+// to chance (the old comparator never returned 0, and the server returns rows
+// unordered) — a Pass logged after a same-day payment must stay after it.
+// Queued offline rows have no createdAt yet and sort last within their day.
+const byPaidOrder = (a, b) => {
+  if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+  const x = a.createdAt || "￿", y = b.createdAt || "￿";
+  return x < y ? -1 : x > y ? 1 : 0;
+};
+
+// Settles the money logged against the rows oldest-first. Compared in whole
+// centavos: every amount is rounded to two decimals, but 0.01 has no exact
+// binary form, so float sums drift by fractions of a centavo — enough for a
+// fully-paid installment to miss a `>=` test and read PARTIAL with "Left
+// ₱0.00". A Pass row owes nothing of its own, so it reads PASSED, never PAID.
+function settleRows(rows, totalLogged) {
+  const cLogged = Math.round(totalLogged * 100);
+  let cDue = 0;
+  rows.forEach(r => {
+    const cRow = Math.round(r.total * 100);
+    cDue += cRow;
+    const cLeft = Math.max(0, cRow - Math.max(0, cLogged - (cDue - cRow)));
+    r.amtLeft = cLeft / 100;
+    r.status = r.isPass && cRow === 0 ? "PASSED" : cLeft <= 0 ? "PAID" : cLeft < cRow ? "PARTIAL" : "UNPAID";
+  });
+}
+
 function computeStatusBase(loan, allPayments) {
   const pAmt = Number(loan.amount), terms = Math.floor(Number(loan.terms));
   const rate = Number(loan.flatRate) / 100;
   const totalInterest = pAmt * rate * terms * freqMult(loan.frequency);
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const intDrop = (pAmt * drop) / terms;
-  const pays = allPayments.filter(p => p.loanId === loan.id).sort((a, b) => a.date < b.date ? -1 : 1);
+  const pays = allPayments.filter(p => p.loanId === loan.id).sort(byPaidOrder);
   const totalLogged = pays.reduce((s, p) => s + Number(p.amount), 0);
-  const extCount = pays.filter(p => p.type === "Minimum Due").length;
+  const extCount = pays.filter(p => DEFERS[p.type]).length;
   const totalRows = terms + extCount;
   const baseP = round2(pAmt / terms);
   const remCents = Math.round(round2(pAmt - baseP * terms) * 100);
@@ -372,11 +405,14 @@ function computeStatusBase(loan, allPayments) {
   // be settled exactly. `intCarry` hands the shaved fraction to the next
   // installment, so every row is a real amount and the column still sums to
   // the quoted total interest.
-  const rows = []; let cumDue = 0, intCarry = 0;
+  // `passCarry` is interest from passed installments, waiting to be added to
+  // the next installment that isn't itself a pass.
+  const rows = []; let intCarry = 0, passCarry = 0;
   for (let step = 1; step <= totalRows; step++) {
     const prevExt = rows.filter(r => r.principal === 0).length;
     const payType = pays[step - 1] ? pays[step - 1].type : "Standard";
-    const isExt = prevExt < extCount && payType === "Minimum Due";
+    const isExt = prevExt < extCount && !!DEFERS[payType];
+    const isPass = isExt && payType === "Pass";
     const schedMonth = step - prevExt;
     const prevRem = step === 1 ? pAmt : rows[step-2].remaining - rows[step-2].principal;
     // Spread the rounding remainder one centavo at a time. remCents goes
@@ -391,20 +427,23 @@ function computeStatusBase(loan, allPayments) {
     const intRaw = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
     const intPaid = round2(intRaw + intCarry);
     intCarry += intRaw - intPaid;
-    const totPay = round2(pPaid + intPaid);
+    let interest = intPaid, carried = 0, passed = 0;
+    if (isPass) { passed = intPaid; passCarry = round2(passCarry + intPaid); interest = 0; }
+    else if (passCarry) { carried = passCarry; interest = round2(intPaid + passCarry); passCarry = 0; }
+    const totPay = round2(pPaid + interest);
     const due = dueDate(loan.frequency, sd, step - 1);
-    cumDue += totPay;
-    // Compared in whole centavos. Every amount above is now rounded to two
-    // decimals, but 0.01 has no exact binary form, so summing them still
-    // drifts by fractions of a centavo — enough for a fully-paid installment
-    // to miss a `>=` test and read PARTIAL with "Left ₱0.00". Integers settle
-    // it exactly, with no tolerance to tune.
-    const cDue = Math.round(cumDue * 100), cLogged = Math.round(totalLogged * 100), cRow = Math.round(totPay * 100);
-    const cLeft = Math.max(0, cRow - Math.max(0, cLogged - (cDue - cRow)));
-    const amtLeft = cLeft / 100;
-    const status = cLeft <= 0 ? "PAID" : cLeft < cRow ? "PARTIAL" : "UNPAID";
-    rows.push({ period: isExt ? `${schedMonth} (Ext)` : String(schedMonth), remaining: prevRem, principal: pPaid, interest: intPaid, total: totPay, due, status, amtLeft, isExt });
+    rows.push({ period: `${schedMonth}${isPass ? " (Pass)" : isExt ? " (Ext)" : ""}`, remaining: prevRem,
+      principal: pPaid, interest, total: totPay, due, isExt, isPass, passed, carried });
   }
+  // A pass on the very last row has no next installment to ride on, so its
+  // interest stays on that row rather than vanishing.
+  if (passCarry && rows.length) {
+    const last = rows[rows.length - 1];
+    last.carried = round2(last.carried + passCarry);
+    last.interest = round2(last.interest + passCarry);
+    last.total = round2(last.total + passCarry);
+  }
+  settleRows(rows, totalLogged);
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
   const grandLeft = Math.max(0, Math.round((pAmt + summedInterest) * 100) - Math.round(totalLogged * 100)) / 100;
@@ -435,6 +474,11 @@ function computeStatus(loan, allPayments) {
   // Changing the term re-prices interest on the remaining balance (more terms = more
   // interest). A frequency-only change keeps the original remaining interest.
   const remI = explicitTerms ? remP * rate * n * freqMult(F1) : after.reduce((s, r) => s + r.interest, 0);
+  // Interest passed just before the revision was riding on an installment
+  // that is now re-priced away; it still has to be collected, so it moves to
+  // the first re-spaced installment. (A frequency-only change already keeps
+  // it inside remI.)
+  const carryIn = explicitTerms ? round2(after.reduce((s, r) => s + (r.carried || 0), 0)) : 0;
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const avgI = remI / n, dropR = (remP * drop) / n;   // diminishing model, scaled to the remainder
   const rem = [];
@@ -445,28 +489,23 @@ function computeStatus(loan, allPayments) {
     const pRaw = remP / n, iRaw = avgI + ((n + 1) / 2 - (i + 1)) * dropR;
     const p = round2(pRaw + remPCarry); remPCarry += pRaw - p;
     const iv = round2(iRaw + remCarry); remCarry += iRaw - iv;
-    rem.push({ principal: p, interest: iv, due: dueDate(F1, D, i), isSwitched: true });
+    const carried = i === 0 ? carryIn : 0;
+    rem.push({ principal: p, interest: round2(iv + carried), due: dueDate(F1, D, i), isSwitched: true, carried });
   }
   const combined = [
-    ...kept.map(r => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt })),
+    ...kept.map(r => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt,
+      isPass: r.isPass, passed: r.passed, carried: r.carried })),
     ...rem
   ];
-  let prevRem = pAmt, cumDue = 0; const rows = [];
+  let prevRem = pAmt; const rows = [];
   combined.forEach((r, i) => {
     const remaining = prevRem, total = round2(r.principal + r.interest);
-    cumDue += total;
-    // Compared in whole centavos. Every amount above is now rounded to two
-    // decimals, but 0.01 has no exact binary form, so summing them still
-    // drifts by fractions of a centavo — enough for a fully-paid installment
-    // to miss a `>=` test and read PARTIAL with "Left ₱0.00". Integers settle
-    // it exactly, with no tolerance to tune.
-    const cDue = Math.round(cumDue * 100), cLogged = Math.round(totalLogged * 100), cRow = Math.round(total * 100);
-    const cLeft = Math.max(0, cRow - Math.max(0, cLogged - (cDue - cRow)));
-    const amtLeft = cLeft / 100;
-    const status = cLeft <= 0 ? "PAID" : cLeft < cRow ? "PARTIAL" : "UNPAID";
-    rows.push({ period: r.isExt ? `${i + 1} (Ext)` : String(i + 1), remaining, principal: r.principal, interest: r.interest, total, due: r.due, status, amtLeft, isExt: !!r.isExt, switched: !!r.isSwitched });
+    rows.push({ period: `${i + 1}${r.isPass ? " (Pass)" : r.isExt ? " (Ext)" : ""}`, remaining, principal: r.principal,
+      interest: r.interest, total, due: r.due, isExt: !!r.isExt, isPass: !!r.isPass,
+      passed: r.passed || 0, carried: r.carried || 0, switched: !!r.isSwitched });
     prevRem = remaining - r.principal;
   });
+  settleRows(rows, totalLogged);
   // Totals are recomputed from the revised rows (a term change moves the interest).
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
   const summedTotal = rows.reduce((s, r) => s + r.total, 0);
@@ -653,6 +692,7 @@ function Badge({ s }) {
     PAID: "bg-emerald-50 text-emerald-600",
     PARTIAL: "bg-amber-50 text-amber-600",
     UNPAID: "bg-slate-100 text-slate-500",
+    PASSED: "bg-sky-50 text-sky-700",
     OVERDUE: "bg-red-50 text-red-600",
     "FULLY PAID": "bg-emerald-50 text-emerald-600",
     "ACTIVE BALANCE": "bg-amber-50 text-amber-600"
@@ -1883,7 +1923,7 @@ function App() {
       acc.outstanding += s.grandLeft;
       acc.collected += s.totalLogged;
       if (s.overallStatus !== "FULLY PAID") acc.active++;
-      if (s.rows.some(r => r.status !== "PAID" && r.due < td)) acc.overdue++;
+      if (s.rows.some(r => r.amtLeft > 0.005 && r.due < td)) acc.overdue++;   // amtLeft, not status: a PASSED row owes nothing
       return acc;
     }, { principal: 0, outstanding: 0, collected: 0, active: 0, overdue: 0 });
   }, [db.loans, db.payments]);
@@ -1895,7 +1935,7 @@ function App() {
     const todayStr = today();
     // Last payment per loan, for the settled rows' sub-line.
     const lastPay = {};
-    db.payments.forEach(p => { if (!lastPay[p.loanId] || p.date > lastPay[p.loanId]) lastPay[p.loanId] = p.date; });
+    db.payments.forEach(p => { if (Number(p.amount) > 0 && (!lastPay[p.loanId] || p.date > lastPay[p.loanId])) lastPay[p.loanId] = p.date; });
     return db.loans.map(l => {
       const s = computeStatus(l, db.payments);
       const paid = s.overallStatus === "FULLY PAID";
@@ -1948,7 +1988,7 @@ function App() {
 
     // Actual cash events: disbursements (out), collections (in), manual entries (in/out).
     const disb = db.loans.map(l => ({ id: "D-" + l.id, date: l.releaseDate || l.startDate, kind: "Disbursement", subtype: "", loanId: l.id, ref: l.ref, borrower: l.borrower, inflow: 0, outflow: Number(l.amount) || 0 }));
-    const coll = db.payments.map(p => {
+    const coll = db.payments.filter(p => Number(p.amount) > 0).map(p => {   // a Pass moves no cash
       const loan = db.loans.find(l => l.id === p.loanId);
       return { id: "P-" + p.id, date: p.date, kind: "Collection", subtype: p.type || "", loanId: p.loanId, ref: loan ? loan.ref : "", borrower: loan ? loan.borrower : "—", inflow: Number(p.amount) || 0, outflow: 0 };
     });
@@ -2552,17 +2592,40 @@ function App() {
       setPayAmount(round2(nextUnpaidRow.amtLeft).toFixed(2));
     } else if (payType === "Minimum Due") {
       setPayAmount(round2(nextUnpaidRow.interest).toFixed(2));
+    } else if (payType === "Pass") {
+      setPayAmount("0.00");
     }
   }, [payType, nextUnpaidRow]);
+
+  // What a Pass would do, worked out by the schedule engine itself: which
+  // installment it skips, how much interest moves, and what the next payment
+  // becomes. It also refuses a pass that wouldn't land on the installment
+  // that's due — a part-paid one, or one whose payments don't line up with
+  // the schedule — because the engine places a pass by payment order.
+  const passPreview = useMemo(() => {
+    if (payType !== "Pass" || !resolved.loan || !statusData || !nextUnpaidRow) return null;
+    if (nextUnpaidRow.status === "PARTIAL")
+      return { error: `Installment ${nextUnpaidRow.period} is already part-paid — log the rest as a Standard payment.` };
+    const idx = statusData.rows.indexOf(nextUnpaidRow);
+    const sim = computeStatus(resolved.loan, [...db.payments,
+      { id: "pass-preview", loanId: resolved.loan.id, date: payDate || today(), amount: 0, type: "Pass" }]);
+    const row = sim.rows[idx];
+    if (!row || !row.isPass)
+      return { error: "This loan's payments don't line up one per installment, so a pass can't be placed. Log a Standard or Minimum Due payment instead." };
+    return { skipped: nextUnpaidRow, moved: row.passed, next: sim.rows.slice(idx + 1).find(r => r.amtLeft > 0.005) || null };
+  }, [payType, payDate, resolved.loan, statusData, nextUnpaidRow, db.payments]);
 
   // Returns whether the payment was banked (server or outbox). The caller uses
   // it to decide whether to close the sheet — a rejected entry has to stay on
   // screen with its values, or the flash message lands on a dismissed form.
   const addPayment = async () => {
     if (!resolved.loan) return false;
-    const amt = Number(payAmount);
-    if (!(amt > 0)) { flash("Enter a payment amount."); return false; }
+    const isPass = payType === "Pass";
+    const amt = isPass ? 0 : Number(payAmount);
+    if (!isPass && !(amt > 0)) { flash("Enter a payment amount."); return false; }
     if (!payDate) { flash("Pick a payment date."); return false; }
+    if (isPass && !passPreview) { flash("Nothing is due to pass."); return false; }
+    if (isPass && passPreview.error) { flash(passPreview.error); return false; }
     //if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
     const row = { id: uuid(), loanId: resolved.loan.id, date: payDate, amount: amt, type: payType };
     try {
@@ -2571,15 +2634,19 @@ function App() {
       await refresh();
       setPayAmount("");
       const over = statusData ? amt - statusData.grandLeft : 0;
-      if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
+      if (isPass) flash(`Passed — ${fmt(passPreview.moved)} interest moves to the next payment`);
+      else if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
       else flash(`Logged ${fmt(amt)}`);
+      if (isPass) setPayType("Standard");   // the next entry is almost always a real payment
       // Alert this user's *other* devices that a payment came in — skip only
       // the device that just posted. Records are private to their owner, so
       // this is targeted at the current user rather than broadcast to all
       // staff, which would leak the borrower and amount to other users.
       api.notify({
-        title: "Payment received",
-        body: `${resolved.loan.borrower} paid ${fmt(amt)} · ${resolved.loan.ref}`,
+        title: isPass ? "Installment passed" : "Payment received",
+        body: isPass
+          ? `${resolved.loan.borrower} passed installment ${passPreview.skipped.period} · ${resolved.loan.ref}`
+          : `${resolved.loan.borrower} paid ${fmt(amt)} · ${resolved.loan.ref}`,
         url: `?loan=${encodeURIComponent(resolved.loan.ref)}`,
         target: session?.user?.id,
         excludeEndpoint: pushEndpoint,
@@ -2592,7 +2659,8 @@ function App() {
       await enqueue("payment", row, prev => ({ ...prev, payments: [...prev.payments, { ...row, pending: true }] }));
       buzz();
       setPayAmount("");
-      flash(`Saved offline — ${fmt(amt)} syncs when you're back online.`);
+      flash(isPass ? "Saved offline — the pass syncs when you're back online." : `Saved offline — ${fmt(amt)} syncs when you're back online.`);
+      if (isPass) setPayType("Standard");
       return true;
     }
   };
@@ -2600,7 +2668,8 @@ function App() {
     // Same guard deleteLoan has. A payment row is 12px tall on a phone and the
     // delete used to fire straight off the tap — one slip destroyed a record
     // and silently moved the borrower's balance.
-    if (!window.confirm(`Delete this ${fmt(p.amount)} payment from ${fmtDate(parseDate(p.date))}?\n\nThe balance and schedule will recalculate.`)) return;
+    const what = p.type === "Pass" ? "pass" : `${fmt(p.amount)} payment`;
+    if (!window.confirm(`Delete this ${what} from ${fmtDate(parseDate(p.date))}?\n\nThe balance and schedule will recalculate.`)) return;
     if (p.pending) { await discardQueued("payments", p.id); flash("Queued payment discarded."); return; }
     try { await api.delPayment(p.id); await refresh(); } catch (e) { console.error(e); flash("Delete failed."); }
   };
@@ -2686,7 +2755,7 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [sheetLoanId]);
 
-  const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort((a, b) => a.date < b.date ? -1 : 1) : [];
+  const loanPayments = resolved.loan ? db.payments.filter(p => p.loanId === resolved.loan.id).sort(byPaidOrder) : [];
 
   // Reset scroll to top whenever the tab changes (better mobile flow)
   const mainRef = useRef(null);
@@ -3391,10 +3460,17 @@ function App() {
                   </tr></thead>
                   <tbody>
                     {statusData.rows.map((r, i) => (
-                      <tr key={i} className={r.isExt ? "bg-amber-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
-                        <td className="px-3 py-2 font-medium">{r.period}</td>
+                      <tr key={i} className={r.isPass ? "bg-sky-50" : r.isExt ? "bg-amber-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
+                        <td className="px-3 py-2 font-medium whitespace-nowrap">{r.period}</td>
                         <td className="px-3 py-2 text-teal-700">{fmt(r.principal)}</td>
-                        <td className="px-3 py-2 text-amber-600">{fmt(r.interest)}</td>
+                        <td className="px-3 py-2 text-amber-600 whitespace-nowrap">
+                          {r.isPass && r.passed > 0 ? (
+                            <span className="text-sky-700">{fmt(r.passed)} → next</span>
+                          ) : (<>
+                            {fmt(r.interest)}
+                            {r.carried > 0 && <span className="block text-[10px] text-sky-700">incl. {fmt(r.carried)} passed</span>}
+                          </>)}
+                        </td>
                         <td className="px-3 py-2 font-semibold">{fmt(r.total)}</td>
                         <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtDate(r.due)}</td>
                         <td className="px-3 py-2"><Badge s={r.status} /></td>
@@ -3429,12 +3505,14 @@ function App() {
                 <ul className="divide-y divide-slate-50">
                   {loanPayments.map(p => (
                     <li key={p.id} className={`flex items-center gap-3 px-4 py-2.5 ${p.pending ? "bg-amber-50" : ""}`}>
-                      <span className="font-semibold text-sm tabular-nums text-slate-800">{fmt(p.amount)}</span>
+                      {p.type === "Pass"
+                        ? <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 text-[11px] font-semibold">Passed</span>
+                        : <span className="font-semibold text-sm tabular-nums text-slate-800">{fmt(p.amount)}</span>}
                       <span className="flex-1 min-w-0 text-[11px] text-slate-400 truncate">
-                        {p.type} · {fmtDate(parseDate(p.date))}
+                        {p.type === "Pass" ? "No payment" : p.type} · {fmtDate(parseDate(p.date))}
                       </span>
                       {p.pending && <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold shrink-0">Queued</span>}
-                      <button onClick={() => deletePayment(p)} aria-label={`Delete the ${fmt(p.amount)} payment from ${fmtDate(parseDate(p.date))}`}
+                      <button onClick={() => deletePayment(p)} aria-label={p.type === "Pass" ? `Delete the pass from ${fmtDate(parseDate(p.date))}` : `Delete the ${fmt(p.amount)} payment from ${fmtDate(parseDate(p.date))}`}
                         className="w-9 h-9 -mr-2 rounded-full flex items-center justify-center text-slate-300 active:bg-slate-100 active:text-red-500 transition shrink-0">
                         <i data-lucide="trash-2" className="w-4 h-4"></i>
                       </button>
@@ -4354,7 +4432,8 @@ function App() {
                   <label className={labelCls}>Amount</label>
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{sym}</span>
-                    <input type="number" inputMode="decimal" className={`${inputCls} pl-8`} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" />
+                    <input type="number" inputMode="decimal" className={`${inputCls} pl-8 disabled:opacity-60`} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00"
+                      disabled={payType === "Pass"} aria-describedby={payType === "Pass" ? "pass-explainer" : undefined} />
                   </div>
                 </div>
                 <div className="relative">
@@ -4369,20 +4448,44 @@ function App() {
                         <b className="font-semibold">Standard</b> pays the whole installment.
                         {" "}<b className="font-semibold">Minimum Due</b> pays the interest only — the principal carries
                         forward and one extra installment is added to the schedule.
+                        {" "}<b className="font-semibold">Pass</b> pays nothing — same as Minimum Due, but that interest
+                        is added to the next payment instead.
                       </span>
                     </button>
                   </label>
                   <select className={inputCls} value={payType} onChange={e => setPayType(e.target.value)}>
-                    <option>Standard</option><option>Minimum Due</option>
+                    <option>Standard</option><option>Minimum Due</option><option>Pass</option>
                   </select>
                 </div>
               </div>
+              {payType === "Pass" && passPreview && (
+                passPreview.error ? (
+                  <p id="pass-explainer" className="rounded-xl bg-amber-50 px-3.5 py-3 text-xs text-amber-800 leading-relaxed">{passPreview.error}</p>
+                ) : (
+                  <div id="pass-explainer" className="rounded-xl bg-sky-50 px-3.5 py-3 space-y-1.5 text-xs text-sky-700 leading-relaxed">
+                    <p>
+                      Nothing is collected for installment {passPreview.skipped.period}.
+                      {" "}Its <span className="font-semibold tabular-nums">{fmt(passPreview.moved)}</span> interest is added to the next payment,
+                      and one installment is added to the end of the schedule.
+                    </p>
+                    {passPreview.next && (
+                      <p className="flex items-baseline justify-between gap-3 pt-1.5 border-t border-sky-200/60">
+                        <span>Next payment · {fmtDate(passPreview.next.due)}</span>
+                        <span className="text-sm font-bold tabular-nums">{fmt(passPreview.next.amtLeft)}</span>
+                      </p>
+                    )}
+                  </div>
+                )
+              )}
               <div>
                 <label className={labelCls}>Date</label>
                 <input type="date" className={inputCls} value={payDate} onChange={e => setPayDate(e.target.value)} />
               </div>
               <button onClick={async () => { if (await addPayment()) setPaySheetOpen(false); }}
-                className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm transition">Add payment</button>
+                disabled={payType === "Pass" && (!passPreview || !!passPreview.error)}
+                className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 disabled:opacity-50 text-white font-semibold text-sm transition">
+                {payType === "Pass" ? "Log pass" : "Add payment"}
+              </button>
             </div>
           </div>
         </div>
