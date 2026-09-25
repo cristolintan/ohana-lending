@@ -388,6 +388,9 @@ function computeCalc({ amount, terms, flatRate, frequency, startDate, dropRate }
 // schedule. Minimum Due pays that row's interest now; a Pass pays nothing, and
 // the row's interest is added to the next installment instead.
 const DEFERS = { "Minimum Due": true, Pass: true };
+// Pays the installment's principal only; its interest is forgiven (the loan's
+// total interest drops by that much). Defers nothing, adds no row.
+const WAIVED = "Waived Interest";
 
 // Oldest first; same-day entries in the order they were recorded. Each
 // payment's type decides which installment it lands on, so ties can't be left
@@ -445,6 +448,9 @@ function computeStatusBase(loan, allPayments) {
     const payType = pays[step - 1] ? pays[step - 1].type : "Standard";
     const isExt = prevExt < extCount && !!DEFERS[payType];
     const isPass = isExt && payType === "Pass";
+    // Waived Interest: this installment is settled on principal alone — its
+    // interest (including any passed onto it) is forgiven, not moved anywhere.
+    const isWaived = !isExt && payType === WAIVED;
     const schedMonth = step - prevExt;
     const prevRem = step === 1 ? pAmt : rows[step-2].remaining - rows[step-2].principal;
     // Spread the rounding remainder one centavo at a time. remCents goes
@@ -459,21 +465,22 @@ function computeStatusBase(loan, allPayments) {
     const intRaw = avgInterest + ((terms + 1) / 2 - tier) * intDrop;
     const intPaid = round2(intRaw + intCarry);
     intCarry += intRaw - intPaid;
-    let interest = intPaid, carried = 0, passed = 0;
+    let interest = intPaid, carried = 0, passed = 0, waived = 0;
     if (isPass) { passed = intPaid; passCarry = round2(passCarry + intPaid); interest = 0; }
     else if (passCarry) { carried = passCarry; interest = round2(intPaid + passCarry); passCarry = 0; }
+    if (isWaived) { waived = interest; interest = 0; }
     const totPay = round2(pPaid + interest);
     const due = dueDate(loan.frequency, sd, step - 1);
     rows.push({ period: `${schedMonth}${isPass ? " (Pass)" : isExt ? " (Ext)" : ""}`, remaining: prevRem,
-      principal: pPaid, interest, total: totPay, due, isExt, isPass, passed, carried });
+      principal: pPaid, interest, total: totPay, due, isExt, isPass, passed, carried, isWaived, waived });
   }
   // A pass on the very last row has no next installment to ride on, so its
-  // interest stays on that row rather than vanishing.
+  // interest stays on that row rather than vanishing (or is waived with it).
   if (passCarry && rows.length) {
     const last = rows[rows.length - 1];
     last.carried = round2(last.carried + passCarry);
-    last.interest = round2(last.interest + passCarry);
-    last.total = round2(last.total + passCarry);
+    if (last.isWaived) last.waived = round2(last.waived + passCarry);
+    else { last.interest = round2(last.interest + passCarry); last.total = round2(last.total + passCarry); }
   }
   settleRows(rows, totalLogged);
   const summedInterest = rows.reduce((s, r) => s + r.interest, 0);
@@ -510,7 +517,7 @@ function computeStatus(loan, allPayments) {
   // that is now re-priced away; it still has to be collected, so it moves to
   // the first re-spaced installment. (A frequency-only change already keeps
   // it inside remI.)
-  const carryIn = explicitTerms ? round2(after.reduce((s, r) => s + (r.carried || 0), 0)) : 0;
+  const carryIn = explicitTerms ? round2(after.reduce((s, r) => s + (r.isWaived ? 0 : (r.carried || 0)), 0)) : 0;
   const drop = (loan.dropRate != null ? Number(loan.dropRate) : Number(loan.flatRate)) / 100;
   const avgI = remI / n, dropR = (remP * drop) / n;   // diminishing model, scaled to the remainder
   const rem = [];
@@ -526,7 +533,7 @@ function computeStatus(loan, allPayments) {
   }
   const combined = [
     ...kept.map(r => ({ principal: r.principal, interest: r.interest, due: r.due, isExt: r.isExt,
-      isPass: r.isPass, passed: r.passed, carried: r.carried })),
+      isPass: r.isPass, passed: r.passed, carried: r.carried, isWaived: r.isWaived, waived: r.waived })),
     ...rem
   ];
   let prevRem = pAmt; const rows = [];
@@ -534,7 +541,7 @@ function computeStatus(loan, allPayments) {
     const remaining = prevRem, total = round2(r.principal + r.interest);
     rows.push({ period: `${i + 1}${r.isPass ? " (Pass)" : r.isExt ? " (Ext)" : ""}`, remaining, principal: r.principal,
       interest: r.interest, total, due: r.due, isExt: !!r.isExt, isPass: !!r.isPass,
-      passed: r.passed || 0, carried: r.carried || 0, switched: !!r.isSwitched });
+      passed: r.passed || 0, carried: r.carried || 0, isWaived: !!r.isWaived, waived: r.waived || 0, switched: !!r.isSwitched });
     prevRem = remaining - r.principal;
   });
   settleRows(rows, totalLogged);
@@ -2638,8 +2645,31 @@ function App() {
       setPayAmount(round2(nextUnpaidRow.interest).toFixed(2));
     } else if (payType === "Pass") {
       setPayAmount("0.00");
+    } else if (payType === WAIVED) {
+      setPayAmount(round2(nextUnpaidRow.principal).toFixed(2));
     }
   }, [payType, nextUnpaidRow]);
+
+  // What Waived Interest would do, from the engine: the interest forgiven on
+  // the installment that's due, and whether the amount entered covers its
+  // principal. Same placement guard as a Pass — a waiver lands by payment
+  // order, so a part-paid or misaligned installment is refused, not guessed at.
+  const waivePreview = useMemo(() => {
+    if (payType !== WAIVED || !resolved.loan || !statusData || !nextUnpaidRow) return null;
+    if (nextUnpaidRow.status === "PARTIAL")
+      return { error: `Installment ${nextUnpaidRow.period} is already part-paid — log the rest as a Standard payment.` };
+    if (!(nextUnpaidRow.principal > 0))
+      return { error: `Installment ${nextUnpaidRow.period} has no principal to pay.` };
+    const idx = statusData.rows.indexOf(nextUnpaidRow);
+    const amt = Number(payAmount) > 0 ? Number(payAmount) : nextUnpaidRow.principal;
+    const sim = computeStatus(resolved.loan, [...db.payments,
+      { id: "waive-preview", loanId: resolved.loan.id, date: payDate || today(), amount: amt, type: WAIVED }]);
+    const row = sim.rows[idx];
+    if (!row || !row.isWaived)
+      return { error: "This loan's payments don't line up one per installment, so a waiver can't be placed. Log a Standard payment instead." };
+    return { row: nextUnpaidRow, waived: row.waived, principal: row.principal, short: row.amtLeft,
+      extra: round2(Math.max(0, amt - row.principal)) };
+  }, [payType, payAmount, payDate, resolved.loan, statusData, nextUnpaidRow, db.payments]);
 
   // What a Pass would do, worked out by the schedule engine itself: which
   // installment it skips, how much interest moves, and what the next payment
@@ -2670,6 +2700,8 @@ function App() {
     if (!payDate) { flash("Pick a payment date."); return false; }
     if (isPass && !passPreview) { flash("Nothing is due to pass."); return false; }
     if (isPass && passPreview.error) { flash(passPreview.error); return false; }
+    const isWaive = payType === WAIVED;
+    if (isWaive && (!waivePreview || waivePreview.error)) { flash(waivePreview ? waivePreview.error : "Nothing is due."); return false; }
     //if (payDate < resolved.loan.startDate) { flash("Payment date is before the loan start."); return; }
     const row = { id: uuid(), loanId: resolved.loan.id, date: payDate, amount: amt, type: payType };
     try {
@@ -2679,9 +2711,10 @@ function App() {
       setPayAmount("");
       const over = statusData ? amt - statusData.grandLeft : 0;
       if (isPass) flash(`Passed — ${fmt(passPreview.moved)} interest moves to the next payment`);
+      else if (isWaive) flash(`Logged ${fmt(amt)} — ${fmt(waivePreview.waived)} interest waived`);
       else if (over > 0.005) flash(`⚠ Logged ${fmt(amt)} — exceeds balance by ${fmt(over)}`);
       else flash(`Logged ${fmt(amt)}`);
-      if (isPass) setPayType("Standard");   // the next entry is almost always a real payment
+      if (isPass || isWaive) setPayType("Standard");   // the next entry is almost always a plain payment
       // Alert this user's *other* devices that a payment came in — skip only
       // the device that just posted. Records are private to their owner, so
       // this is targeted at the current user rather than broadcast to all
@@ -2690,7 +2723,7 @@ function App() {
         title: isPass ? "Installment passed" : "Payment received",
         body: isPass
           ? `${resolved.loan.borrower} passed installment ${passPreview.skipped.period} · ${resolved.loan.ref}`
-          : `${resolved.loan.borrower} paid ${fmt(amt)} · ${resolved.loan.ref}`,
+          : `${resolved.loan.borrower} paid ${fmt(amt)}${isWaive ? " (interest waived)" : ""} · ${resolved.loan.ref}`,
         url: `?loan=${encodeURIComponent(resolved.loan.ref)}`,
         target: session?.user?.id,
         excludeEndpoint: pushEndpoint,
@@ -2704,7 +2737,7 @@ function App() {
       buzz();
       setPayAmount("");
       flash(isPass ? "Saved offline — the pass syncs when you're back online." : `Saved offline — ${fmt(amt)} syncs when you're back online.`);
-      if (isPass) setPayType("Standard");
+      if (isPass || isWaive) setPayType("Standard");
       return true;
     }
   };
@@ -3519,6 +3552,8 @@ function App() {
                         <td className="px-3 py-2 text-amber-600 whitespace-nowrap">
                           {r.isPass && r.passed > 0 ? (
                             <span className="text-sky-700">{fmt(r.passed)} → next</span>
+                          ) : r.isWaived ? (
+                            <span className="text-emerald-700"><span className="line-through text-slate-400">{fmt(r.waived)}</span> waived</span>
                           ) : (<>
                             {fmt(r.interest)}
                             {r.carried > 0 && <span className="block text-[10px] text-sky-700">incl. {fmt(r.carried)} passed</span>}
@@ -4359,7 +4394,9 @@ function App() {
                       <td className="px-2 py-2 font-semibold text-slate-800 whitespace-nowrap">{fmtDate(r.due)}</td>
                       <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-slate-900">
                         {r.isPass ? <span className="text-sky-700">{fmt(r.passed)} → next</span> : fmt(r.total)}
-                        {r.carried > 0 && <span className="block text-[12px] text-sky-700">incl. {fmt(r.carried)} passed</span>}
+                        {r.isWaived
+                          ? <span className="block text-[12px] text-emerald-700">{fmt(r.waived)} interest waived</span>
+                          : r.carried > 0 && <span className="block text-[12px] text-sky-700">incl. {fmt(r.carried)} passed</span>}
                       </td>
                       <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-slate-600">{r.isPass ? "—" : fmt(round2(r.total - r.amtLeft))}</td>
                       <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap font-semibold text-slate-900">{r.isPass ? "—" : fmt(r.amtLeft)}</td>
@@ -4600,7 +4637,7 @@ function App() {
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{sym}</span>
                     <input type="number" inputMode="decimal" className={`${inputCls} pl-8 disabled:opacity-60`} value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00"
-                      disabled={payType === "Pass"} aria-describedby={payType === "Pass" ? "pass-explainer" : undefined} />
+                      disabled={payType === "Pass"} aria-describedby={payType === "Pass" ? "pass-explainer" : payType === WAIVED ? "waive-explainer" : undefined} />
                   </div>
                 </div>
                 <div className="relative">
@@ -4617,14 +4654,36 @@ function App() {
                         forward and one extra installment is added to the schedule.
                         {" "}<b className="font-semibold">Pass</b> pays nothing — same as Minimum Due, but that interest
                         is added to the next payment instead.
+                        {" "}<b className="font-semibold">Waived Interest</b> pays the principal only — that
+                        installment's interest is forgiven.
                       </span>
                     </button>
                   </label>
                   <select className={inputCls} value={payType} onChange={e => setPayType(e.target.value)}>
-                    <option>Standard</option><option>Minimum Due</option><option>Pass</option>
+                    <option>Standard</option><option>Minimum Due</option><option>Pass</option><option>{WAIVED}</option>
                   </select>
                 </div>
               </div>
+              {payType === WAIVED && waivePreview && (
+                waivePreview.error ? (
+                  <p id="waive-explainer" className="rounded-xl bg-amber-50 px-3.5 py-3 text-xs text-amber-800 leading-relaxed">{waivePreview.error}</p>
+                ) : (
+                  <div id="waive-explainer" className="rounded-xl bg-emerald-50 px-3.5 py-3 space-y-1.5 text-xs text-emerald-700 leading-relaxed">
+                    <p>
+                      Installment {waivePreview.row.period} is settled with its principal
+                      {" "}<span className="font-semibold tabular-nums">{fmt(waivePreview.principal)}</span>.
+                      {" "}Its <span className="font-semibold tabular-nums">{fmt(waivePreview.waived)}</span> interest is waived
+                      {" "}— the loan's total interest drops by that amount.
+                    </p>
+                    {waivePreview.short > 0.005 && (
+                      <p className="font-semibold text-amber-700">{fmt(waivePreview.short)} of the principal will still be owed on this installment.</p>
+                    )}
+                    {waivePreview.extra > 0.005 && (
+                      <p>The extra {fmt(waivePreview.extra)} goes toward the next installment.</p>
+                    )}
+                  </div>
+                )
+              )}
               {payType === "Pass" && passPreview && (
                 passPreview.error ? (
                   <p id="pass-explainer" className="rounded-xl bg-amber-50 px-3.5 py-3 text-xs text-amber-800 leading-relaxed">{passPreview.error}</p>
@@ -4649,7 +4708,7 @@ function App() {
                 <input type="date" className={inputCls} value={payDate} onChange={e => setPayDate(e.target.value)} />
               </div>
               <button onClick={async () => { if (await addPayment()) setPaySheetOpen(false); }}
-                disabled={payType === "Pass" && (!passPreview || !!passPreview.error)}
+                disabled={(payType === "Pass" && (!passPreview || !!passPreview.error)) || (payType === WAIVED && (!waivePreview || !!waivePreview.error))}
                 className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 disabled:opacity-50 text-white font-semibold text-sm transition">
                 {payType === "Pass" ? "Log pass" : "Add payment"}
               </button>
