@@ -190,6 +190,31 @@
       #schedule-export-doc .text-\[\#27313e\] { color: #27313e !important; }
       #schedule-export-doc .text-\[\#eb652e\] { color: #eb652e !important; }
       #schedule-export-doc .border-slate-100 { border-color: #e2e8f0 !important; }
+
+      /* The Payments tab's status image (Share) goes to a borrower too — same
+         light paper, plus the status colours it uses (red overdue, sky passed). */
+      #status-export-doc { background: #ffffff !important; color: #0f172a !important; }
+      #status-export-doc .bg-white      { background-color: #ffffff !important; }
+      #status-export-doc .bg-slate-50   { background-color: #f8fafc !important; }
+      #status-export-doc .bg-slate-100  { background-color: #f1f5f9 !important; }
+      #status-export-doc .bg-emerald-50 { background-color: #ecfdf5 !important; }
+      #status-export-doc .bg-amber-50   { background-color: #fffbeb !important; }
+      #status-export-doc .bg-red-50     { background-color: #fef2f2 !important; }
+      #status-export-doc .bg-sky-50     { background-color: #f0f9ff !important; }
+      #status-export-doc .text-slate-900 { color: #0f172a !important; }
+      #status-export-doc .text-slate-800 { color: #1e293b !important; }
+      #status-export-doc .text-slate-700 { color: #334155 !important; }
+      #status-export-doc .text-slate-600 { color: #475569 !important; }
+      #status-export-doc .text-slate-500 { color: #64748b !important; }
+      #status-export-doc .text-slate-300 { color: #cbd5e1 !important; }
+      #status-export-doc .text-emerald-800 { color: #065f46 !important; }
+      #status-export-doc .text-emerald-700 { color: #047857 !important; }
+      #status-export-doc .text-emerald-600 { color: #059669 !important; }
+      #status-export-doc .text-amber-700 { color: #b45309 !important; }
+      #status-export-doc .text-amber-600 { color: #d97706 !important; }
+      #status-export-doc .text-red-600 { color: #dc2626 !important; }
+      #status-export-doc .text-sky-700 { color: #0369a1 !important; }
+      #status-export-doc .divide-slate-100 > * + * { border-color: #f1f5f9 !important; }
     }
     /* Lucide icons are painted INSIDE the <i> React renders (see paintIcons in
        app.js) instead of replacing it — replacing it crashed React to a black
