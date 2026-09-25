@@ -121,3 +121,20 @@ row), but the passed period's interest is not collected — it is added to the n
   after fix — Pass: alive, next payment ₱3,880.00 (₱3,190 + ₱690 passed) due Sep 30; Standard: alive, next ₱3,090.00.
   All 5 tabs: every icon painted, no stray markers, no errors; icon geometry/colour identical to before in 5 layouts;
   active-tab stroke now updates. esbuild parse OK.
+
+# Payments: Share status with borrower
+
+- [x] Share button in "Schedule & Status" header (icon-only on phones, "Share" on sm+; also on fully paid loans)
+- [x] Off-screen `#status-export-doc` (640px): borrower, ref, as-of date, release date; Total to pay / Paid so far /
+      Balance; next or overdue payment callout (or "Fully paid — thank you!"); table No./Due date/Amount due/Paid/
+      Left/Status (Paid, Part-paid, Unpaid, Overdue, Passed, incl. passed interest); payments received list
+- [x] `captureToShare()` shared by schedule + status export; preview sheet title/subtitle come from the capture
+- [x] index.html pins #status-export-doc to light paper colours in dark mode; sw.js → v30
+
+## Review
+
+- **Verified (headless Chrome, real app.js + stub Supabase, Cielo OL-0002):** Share → preview sheet "Status image
+  ready / Cielo · OL-0002", image 1280×1752, no errors. Visually checked: with Pass (total ₱18,930, passed row,
+  next ₱3,880 Sep 30) and without (installment 2 red "Overdue", ₱3,190). Dark and light mode render identical
+  paper. Payments header at 360px: no overflow, title not truncated. esbuild parse OK.
+- **Known risks:** Not tried on a physical iPhone share sheet (same share path as the existing schedule image).

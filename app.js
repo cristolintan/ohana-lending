@@ -1731,8 +1731,21 @@ function App() {
   // built for a phone — a fixed-width scroller that crops to whatever columns
   // happen to be visible — whereas the document is laid out once at a readable
   // width with the loan terms and totals a bare schedule doesn't convey.
-  const exportSchedulePng = async () => {
-    const el = document.getElementById("schedule-export-doc");
+  const exportSchedulePng = () => captureToShare("schedule-export-doc",
+    `Payment Schedule - ${name.trim() || "loan"}.png`, "Schedule image ready", name.trim() || "Unnamed borrower");
+
+  // Same capture for the Payments tab: the borrower-facing status document.
+  const exportStatusPng = () => {
+    const l = resolved.loan;
+    if (!l) return;
+    return captureToShare("status-export-doc",
+      `Payment Status - ${l.borrower} - ${fmtDate(new Date())}.png`, "Status image ready", `${l.borrower} · ${l.ref || ""}`.trim());
+  };
+
+  // Renders an off-screen export document to a PNG and opens the preview sheet
+  // (title/subtitle label that sheet), from which it is shared with a fresh tap.
+  const captureToShare = async (elId, filename, title, subtitle) => {
+    const el = document.getElementById(elId);
     if (!el || !window.html2canvas) { flash("Image tools not ready — reload once online."); return; }
     setExportBusy(true);
     try {
@@ -1752,8 +1765,7 @@ function App() {
       if (!blob) throw new Error("canvas produced no image");
       setShareImg(prev => {
         if (prev) URL.revokeObjectURL(prev.url);
-        return { url: URL.createObjectURL(blob), blob,
-                 filename: `Payment Schedule - ${name.trim() || "loan"}.png` };
+        return { url: URL.createObjectURL(blob), blob, filename, title, subtitle };
       });
     } catch (e) { console.error(e); flash("Could not export image."); }
     finally { setExportBusy(false); }
@@ -3475,15 +3487,24 @@ function App() {
 
             {/* Schedule */}
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden md:col-span-7">
-              <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between gap-3">
-                <p className="font-semibold text-slate-800">Schedule & Status</p>
-                {statusData.overallStatus !== "FULLY PAID" && (
-                  <button onClick={() => { buzz(); setPaySheetOpen(true); }}
-                    className="px-3 py-2 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0 transition">
-                    <i data-lucide="plus" className="w-3.5 h-3.5"></i>
-                    Log payment
+              <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between gap-2">
+                <p className="font-semibold text-slate-800 min-w-0 truncate">Schedule & Status</p>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {/* Shown on settled loans too — "fully paid" is worth sending. */}
+                  <button onClick={() => { buzz(); exportStatusPng(); }} disabled={exportBusy}
+                    aria-label="Share status with borrower" title="Share status with borrower"
+                    className="h-8 px-2.5 rounded-lg bg-slate-100 text-slate-600 active:bg-slate-200 disabled:opacity-60 text-xs font-semibold flex items-center gap-1.5 transition">
+                    <i data-lucide={exportBusy ? "loader" : "share-2"} className={`w-3.5 h-3.5 ${exportBusy ? "animate-spin" : ""}`}></i>
+                    <span className="hidden sm:inline">{exportBusy ? "Preparing…" : "Share"}</span>
                   </button>
-                )}
+                  {statusData.overallStatus !== "FULLY PAID" && (
+                    <button onClick={() => { buzz(); setPaySheetOpen(true); }}
+                      className="h-8 px-3 rounded-lg bg-emerald-600 active:bg-emerald-800 text-white text-xs font-semibold flex items-center gap-1.5 transition">
+                      <i data-lucide="plus" className="w-3.5 h-3.5"></i>
+                      Log payment
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -4224,8 +4245,8 @@ function App() {
               <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-semibold text-slate-800">Schedule image ready</p>
-                  <p className="text-xs text-slate-400 truncate">{name.trim() || "Unnamed borrower"}</p>
+                  <p className="font-semibold text-slate-800">{shareImg.title}</p>
+                  <p className="text-xs text-slate-400 truncate">{shareImg.subtitle}</p>
                 </div>
                 <button onClick={closeShareImg} aria-label="Close"
                   className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
@@ -4234,7 +4255,7 @@ function App() {
 
             <div className="px-4 py-4 space-y-3">
               <div className="rounded-xl border border-slate-200 overflow-hidden bg-slate-50">
-                <img src={shareImg.url} alt="Payment schedule preview" className="w-full block" />
+                <img src={shareImg.url} alt={`${shareImg.title} — preview`} className="w-full block" />
               </div>
 
               <button onClick={shareScheduleImage}
@@ -4260,6 +4281,120 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* ── Status export document ────────────────────────────────────────────
+          What the Payments tab's Share captures, for the borrower: what they
+          owe in total, what they've paid, what's left, what's due next, and
+          each installment's standing. Off-screen at a readable width like the
+          schedule document below; index.html pins it to light "paper" colours
+          so a dark-mode phone never bakes a dark image. */}
+      {resolved.loan && statusData && (() => {
+        const l = resolved.loan, st = statusData, todayStr = today();
+        const late = r => r.amtLeft > 0.005 && isoDay(r.due) < todayStr;
+        const standing = r => r.status === "PASSED" ? ["Passed", "text-sky-700"]
+          : r.status === "PAID" ? ["Paid", "text-emerald-700"]
+          : late(r) ? [r.status === "PARTIAL" ? "Overdue · part-paid" : "Overdue", "text-red-600"]
+          : r.status === "PARTIAL" ? ["Part-paid", "text-amber-700"] : ["Unpaid", "text-slate-500"];
+        const next = nextUnpaidRow;
+        const totalToPay = round2(Number(l.amount) + st.summedInterest);
+        return (
+          <div id="status-export-doc" aria-hidden="true"
+            style={{ position: "fixed", top: 0, left: "-10000px", background: "#ffffff", width: "640px" }}>
+            <div className="px-6 pt-7 pb-5">
+              <p className="text-[13px] font-bold tracking-[0.18em] text-emerald-600">PAYMENT STATUS</p>
+              <p className="mt-1 text-3xl font-bold text-slate-900 leading-tight">{l.borrower}</p>
+              <p className="mt-2 text-[15px] text-slate-500">
+                {l.ref}
+                <span className="text-slate-300"> · </span>As of <span className="font-semibold text-slate-700">{fmtDate(new Date())}</span>
+                <span className="text-slate-300"> · </span>Released {fmtDate(parseDate(l.releaseDate || l.startDate))}
+              </p>
+
+              <div className="mt-5 grid grid-cols-3 gap-3">
+                <div className="rounded-2xl bg-slate-50 px-3 py-3">
+                  <p className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Total to pay</p>
+                  <p className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">{fmt(totalToPay)}</p>
+                </div>
+                <div className="rounded-2xl bg-emerald-50 px-3 py-3">
+                  <p className="text-[12px] font-semibold uppercase tracking-wide text-emerald-600">Paid so far</p>
+                  <p className="mt-1 text-2xl font-bold text-emerald-700 tabular-nums">{fmt(st.totalLogged)}</p>
+                </div>
+                <div className="rounded-2xl bg-amber-50 px-3 py-3">
+                  <p className="text-[12px] font-semibold uppercase tracking-wide text-amber-600">Balance</p>
+                  <p className="mt-1 text-2xl font-bold text-amber-700 tabular-nums">{fmt(st.grandLeft)}</p>
+                </div>
+              </div>
+
+              {st.overallStatus === "FULLY PAID" ? (
+                <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-lg font-bold text-emerald-700">Fully paid — thank you!</p>
+              ) : next && (
+                <div className={`mt-4 rounded-2xl px-4 py-3 flex items-baseline justify-between gap-4 ${late(next) ? "bg-red-50" : "bg-slate-50"}`}>
+                  <div>
+                    <p className={`text-[12px] font-semibold uppercase tracking-wide ${late(next) ? "text-red-600" : "text-slate-500"}`}>
+                      {late(next) ? "Overdue payment" : "Next payment"}
+                    </p>
+                    <p className="text-[15px] text-slate-600">Installment {next.period} · due {fmtDate(next.due)}</p>
+                  </div>
+                  <p className={`text-3xl font-bold tabular-nums ${late(next) ? "text-red-600" : "text-slate-900"}`}>{fmt(next.amtLeft)}</p>
+                </div>
+              )}
+            </div>
+
+            <table className="w-full text-[16px] leading-6" style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr className="bg-slate-100 text-slate-500">
+                  <th className="pl-6 pr-2 py-2.5 text-left text-[12px] font-bold uppercase tracking-wide">No.</th>
+                  <th className="px-2 py-2.5 text-left text-[12px] font-bold uppercase tracking-wide">Due date</th>
+                  <th className="px-2 py-2.5 text-right text-[12px] font-bold uppercase tracking-wide">Amount due</th>
+                  <th className="px-2 py-2.5 text-right text-[12px] font-bold uppercase tracking-wide">Paid</th>
+                  <th className="px-2 py-2.5 text-right text-[12px] font-bold uppercase tracking-wide">Left</th>
+                  <th className="pl-2 pr-6 py-2.5 text-left text-[12px] font-bold uppercase tracking-wide">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {st.rows.map((r, i) => {
+                  const [word, tone] = standing(r);
+                  return (
+                    <tr key={i} className={r.isPass ? "bg-sky-50" : i % 2 ? "bg-slate-50" : "bg-white"}>
+                      <td className="pl-6 pr-2 py-2 font-semibold text-slate-500 whitespace-nowrap">{r.period}</td>
+                      <td className="px-2 py-2 font-semibold text-slate-800 whitespace-nowrap">{fmtDate(r.due)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-slate-900">
+                        {r.isPass ? <span className="text-sky-700">{fmt(r.passed)} → next</span> : fmt(r.total)}
+                        {r.carried > 0 && <span className="block text-[12px] text-sky-700">incl. {fmt(r.carried)} passed</span>}
+                      </td>
+                      <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-slate-600">{r.isPass ? "—" : fmt(round2(r.total - r.amtLeft))}</td>
+                      <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap font-semibold text-slate-900">{r.isPass ? "—" : fmt(r.amtLeft)}</td>
+                      <td className={`pl-2 pr-6 py-2 font-bold whitespace-nowrap ${tone}`}>{word}</td>
+                    </tr>
+                  );
+                })}
+                <tr className="bg-emerald-50">
+                  <td className="pl-6 pr-2 py-3 font-bold text-emerald-800" colSpan={2}>Total</td>
+                  <td className="px-2 py-3 text-right font-bold text-slate-900 tabular-nums whitespace-nowrap">{fmt(totalToPay)}</td>
+                  <td className="px-2 py-3 text-right font-bold text-emerald-700 tabular-nums whitespace-nowrap">{fmt(st.totalLogged)}</td>
+                  <td className="px-2 py-3 text-right font-bold text-slate-900 tabular-nums whitespace-nowrap">{fmt(st.grandLeft)}</td>
+                  <td className="pl-2 pr-6 py-3"></td>
+                </tr>
+              </tbody>
+            </table>
+
+            {loanPayments.length > 0 && (
+              <div className="px-6 pt-5 pb-7">
+                <p className="text-[13px] font-bold uppercase tracking-wide text-slate-500">Payments received</p>
+                <div className="mt-2 divide-y divide-slate-100">
+                  {loanPayments.map(p => (
+                    <div key={p.id} className="flex items-baseline justify-between gap-4 py-1.5 text-[15px]">
+                      <span className="text-slate-700">{fmtDate(parseDate(p.date))}
+                        {p.type !== "Standard" && <span className="text-slate-500"> · {p.type === "Pass" ? "Passed (no payment)" : p.type}</span>}
+                      </span>
+                      <span className="font-semibold tabular-nums text-slate-900">{p.type === "Pass" ? "—" : fmt(p.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Schedule export document ──────────────────────────────────────────
           What "Save image" actually captures. Parked off-screen (never visible,
