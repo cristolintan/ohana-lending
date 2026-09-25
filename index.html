@@ -191,6 +191,11 @@
       #schedule-export-doc .text-\[\#eb652e\] { color: #eb652e !important; }
       #schedule-export-doc .border-slate-100 { border-color: #e2e8f0 !important; }
     }
+    /* Lucide icons are painted INSIDE the <i> React renders (see paintIcons in
+       app.js) instead of replacing it — replacing it crashed React to a black
+       screen. display:contents lets the inner <svg> lay out as if it stood
+       alone, so every icon keeps its size, position and colour. */
+    i[data-lucide] { display: contents; }
     /* Smooth momentum scroll on iOS */
     .scroll-ios { -webkit-overflow-scrolling: touch; overflow-y: auto; }
     /* Prevent text size adjustment on rotation */

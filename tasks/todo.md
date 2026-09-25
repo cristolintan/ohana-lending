@@ -107,3 +107,17 @@ row), but the passed period's interest is not collected — it is added to the n
 - **Known risks:** Not clicked through in a browser. Placement is by payment order (same as Minimum Due) — the sheet
   refuses a pass it can't place. overdue-check must be redeployed or the server treats a Pass as ₱0 Standard and
   sends an overdue alert for the passed installment. → DEPLOYED (user approved): overdue-check v9, verify_jwt=false (unchanged), same file layout; not invoked manually (would send real pushes).
+
+# Bug: black screen after logging a Pass (Cielo, OL-0002)
+
+- **Cause:** Lucide's `createIcons()` replaced every `<i data-lucide>` React rendered with an `<svg>`. The "Next payment
+  due" card renders `{late && <i data-lucide="alert-triangle">}`; clearing the last overdue installment (a Pass *or* a
+  normal payment) made React remove that `<i>` → `NotFoundError: removeChild` → React unmounted the app (black in
+  dark mode). Reload drew it fresh, so it looked fine. Same class of crash on insertBefore next to any icon.
+- **Fix:** `paintIcons()` paints each svg *inside* the React-owned `<i>` (placeholder + `createIcons({nameAttr})`),
+  repaints only when name/class/style change; `i[data-lucide]{display:contents}` in index.html. sw.js → v29.
+- **Verified (headless Chrome, real app.js + stub Supabase with Cielo's data):**
+  before fix — Pass: blank + removeChild error; Standard ₱3,190 on the overdue installment: blank + same error.
+  after fix — Pass: alive, next payment ₱3,880.00 (₱3,190 + ₱690 passed) due Sep 30; Standard: alive, next ₱3,090.00.
+  All 5 tabs: every icon painted, no stray markers, no errors; icon geometry/colour identical to before in 5 layouts;
+  active-tab stroke now updates. esbuild parse OK.
