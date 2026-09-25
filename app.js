@@ -245,7 +245,10 @@ const api = {
       payments: (P.data || []).map(rowToPay),
       transactions: (T.data || []).map(rowToTx),
       queue: (Q.data || []).map(rowToQueue),
-      settings: { openingBalance: +((S.data && S.data.opening_balance) || 0) },
+      settings: {
+        openingBalance: +((S.data && S.data.opening_balance) || 0),
+        members: Array.isArray(S.data && S.data.members) ? S.data.members : [],
+      },
     };
   },
   async createLoan(l) {
@@ -305,6 +308,14 @@ const api = {
     const uid = await myUid();
     if (!uid) throw new Error("Not signed in.");
     const { error } = await sb.from("settings").upsert({ user_id: uid, opening_balance: v });
+    if (error) throw error;
+  },
+  // Co-op members [{id, name, capital}] live on the same per-user settings row.
+  // The upsert names only this column, so the opening balance is left alone.
+  async setMembers(list) {
+    const uid = await myUid();
+    if (!uid) throw new Error("Not signed in.");
+    const { error } = await sb.from("settings").upsert({ user_id: uid, members: list });
     if (error) throw error;
   },
 };
@@ -571,6 +582,42 @@ function principalRecovered(st) {
     left -= applied;
   }
   return principal;
+}
+
+// Splits `total` across `weights` to the centavo. Each part is floored, then the
+// leftover centavos go to the largest remainders, so the parts always add back
+// up to the total exactly — the member rows never drift ₱0.01 from the footer.
+function splitCents(total, weights) {
+  const cents = Math.round(total * 100), sum = weights.reduce((s, w) => s + w, 0);
+  if (!(sum > 0)) return weights.map(() => 0);
+  const raw = weights.map(w => cents * w / sum);
+  const out = raw.map(Math.floor);
+  let left = cents - out.reduce((s, c) => s + c, 0);
+  raw.map((r, i) => [r - out[i], i]).sort((a, b) => b[0] - a[0])
+    .forEach(([, i]) => { if (left > 0) { out[i]++; left--; } });
+  return out.map(c => c / 100);
+}
+
+// What each co-op member's stake is worth today. The pool is cash on hand plus
+// principal still with borrowers — future interest is deliberately left out,
+// because it isn't money yet. Members own the pool in proportion to the capital
+// they put in (8 × ₱30,000 is an equal eighth each).
+function memberShares(members, cash, principal) {
+  const list = (members || []).filter(m => Number(m.capital) > 0);
+  const caps = list.map(m => Number(m.capital));
+  const capital = round2(caps.reduce((s, c) => s + c, 0));
+  // The value is split first (equal capital → equal value, at most a centavo
+  // apart); principal is whatever of that value isn't cash.
+  const valueParts = splitCents(cash + principal, caps), cashParts = splitCents(cash, caps);
+  const rows = list.map((m, i) => {
+    const value = valueParts[i];
+    return { id: m.id, name: m.name, capital: caps[i], share: caps[i] / capital,
+      cash: cashParts[i], principal: round2(value - cashParts[i]), value,
+      gain: round2(value - caps[i]), pct: (value - caps[i]) / caps[i] * 100 };
+  });
+  const value = round2(cash + principal);
+  return { rows, capital, cash: round2(cash), principal: round2(principal), value,
+    gain: round2(value - capital), pct: capital > 0 ? (value - capital) / capital * 100 : null };
 }
 
 // ─── Tiny components ─────────────────────────────────────────────────────────
@@ -1327,6 +1374,9 @@ function App() {
   }, [cfInfo]);
   const [cfFilterOpen, setCfFilterOpen] = useState(false);
   const [cfEntryOpen, setCfEntryOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);   // co-op members editor
+  const [memberDraft, setMemberDraft] = useState([]);
+  const [membersBusy, setMembersBusy] = useState(false);
   // Forecast horizon. Defaults to 30 days out, but the lender picks the date —
   // "how much cash will I have by payday / by the 15th" is the real question.
   const [cfForecastDate, setCfForecastDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() + 30); return isoDay(d); });
@@ -2047,6 +2097,23 @@ function App() {
     };
   }, [db.loans, db.payments, db.transactions, db.settings, cfMonth, cfAllTime, cfAgg, cfDir, cfGroup, cfSearch, cfProjected]);
 
+  // Co-op members' stake, always as at today — it ignores the period picker,
+  // because "what is my share worth" only has one answer. Capital on record and
+  // withdrawals are all-time too, so the card can explain the number it shows.
+  const members = (db.settings && db.settings.members) || [];
+  const coop = useMemo(() => {
+    const s = memberShares(members, cashflow.balance, cashflow.outstandingPrincipal);
+    const tx = db.transactions || [];
+    const sumKind = k => tx.filter(t => t.kind === k).reduce((a, t) => a + (Number(t.amount) || 0), 0);
+    const opening = Number(db.settings && db.settings.openingBalance) || 0;
+    return {
+      ...s,
+      capitalOnRecord: round2(opening + sumKind("Capital Injection")),
+      withdrawn: round2(sumKind("Withdrawal")),
+      interestEarned: db.loans.reduce((a, l) => a + realizedInterestUpTo(l, db.payments, "9999-12-31", true), 0),
+    };
+  }, [cashflow.balance, cashflow.outstandingPrincipal, db.transactions, db.settings, db.loans, db.payments]);
+
   // Every unpaid installment, earliest first. Overdue keeps its real due date
   // here, unlike the projected ledger rows which clamp to today so the running
   // balance stays chronological.
@@ -2366,6 +2433,44 @@ function App() {
     if (q && !(row.note || "").toLowerCase().includes(q)) setCfSearch("");
   };
 
+  // First-time setup starts from the co-op as it was founded — 8 members at
+  // ₱30,000 — so it is a matter of typing names, not building rows.
+  const openMembers = () => {
+    setMemberDraft(members.length
+      ? members.map(m => ({ id: m.id || uuid(), name: m.name || "", capital: String(m.capital) }))
+      : Array.from({ length: 8 }, () => ({ id: uuid(), name: "", capital: "30000" })));
+    setMembersOpen(true);
+  };
+  const editMember = (id, patch) => setMemberDraft(d => d.map(m => m.id === id ? { ...m, ...patch } : m));
+  const saveMembers = async () => {
+    const clean = memberDraft.map(m => ({ id: m.id, name: m.name.trim(), capital: round2(Number(m.capital) || 0) }));
+    if (clean.some(m => !m.name)) { flash("Name every member, or remove the empty rows."); return; }
+    if (clean.some(m => !(m.capital > 0))) { flash("Each member's capital must be more than 0."); return; }
+    const names = clean.map(m => m.name.toLowerCase());
+    if (new Set(names).size !== names.length) { flash("Two members have the same name."); return; }
+    setMembersBusy(true);
+    try { await api.setMembers(clean); await refresh(); setMembersOpen(false); flash(`Saved ${clean.length} member${clean.length !== 1 ? "s" : ""}.`); }
+    catch (e) { console.error(e); flash(isNetworkError(e) ? "Members need a connection — reconnect and try again." : "Could not save members."); }
+    finally { setMembersBusy(false); }
+  };
+  // Plain text for the members' group chat: one line per member, like
+  // "Tolin — ₱45,000.00 (+₱15,000.00)". Share sheet on phones, clipboard elsewhere.
+  const shareMembers = async () => {
+    const sign = v => (v >= 0 ? "+" : "−") + fmt(Math.abs(v));
+    const text = [
+      `Co-op share · as of ${fmtDate(new Date())}`,
+      `Total ${fmt(coop.value)} = cash ${fmt(coop.cash)} + principal ${fmt(coop.principal)}`,
+      "",
+      ...coop.rows.map(r => `${r.name} — ${fmt(r.value)} (${sign(r.gain)})`),
+      "",
+      "Future interest not included.",
+    ].join("\n");
+    try { if (navigator.share) { await navigator.share({ text }); return; } }
+    catch (e) { if (e && e.name === "AbortError") return; }
+    try { await navigator.clipboard.writeText(text); flash("Copied — paste it in your group chat."); }
+    catch { flash("Could not copy the summary."); }
+  };
+
   const addTransaction = async () => {
     const amt = Number(txAmount);
     if (!(amt > 0)) { flash("Enter an amount greater than 0."); return; }
@@ -2547,6 +2652,12 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [reviseOpen]);
   useEffect(() => { setReviseOpen(false); }, [resolved.loan && resolved.loan.id]);
+  useEffect(() => {
+    if (!membersOpen) return;
+    const onKey = e => { if (e.key === "Escape") setMembersOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [membersOpen]);
 
   // The action sheet follows the live row, so an ID upload (which refreshes db)
   // repaints it in place rather than closing it.
@@ -3488,6 +3599,134 @@ function App() {
                 </div>
               </div>
 
+              {/* ── MEMBERS' SHARE — what each co-op member's stake is worth
+                     today: cash on hand + principal with borrowers, split by
+                     capital. Future interest is left out on purpose. ── */}
+              <div className={`${cardCls} overflow-hidden md:col-span-12`}>
+                <div className="p-4 space-y-3.5">
+                  <CardHead title="Members' share" hint="As at today · cash on hand + principal with borrowers"
+                    right={members.length > 0 && (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button onClick={shareMembers} aria-label="Share the members' summary"
+                          className="w-9 h-9 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center active:bg-slate-200 transition">
+                          <i data-lucide="share-2" className="w-4 h-4"></i>
+                        </button>
+                        <button onClick={openMembers}
+                          className="h-9 px-3 rounded-xl bg-slate-100 text-slate-600 text-xs font-semibold flex items-center gap-1.5 active:bg-slate-200 transition">
+                          <i data-lucide="pencil" className="w-3.5 h-3.5"></i>Edit
+                        </button>
+                      </div>
+                    )} />
+
+                  {!members.length ? (
+                    <EmptyPanel icon="users" title="Add your co-op members"
+                      body="Enter each member's name and capital. Cash on hand and the principal still with borrowers are then split by each member's share."
+                      action="Set up members" onAction={openMembers} />
+                  ) : (<>
+                    <div className="grid grid-cols-3 gap-2.5">
+                      <div className="rounded-xl bg-slate-50 p-3 min-w-0">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Co-op value</p>
+                        <p className="mt-1 text-sm sm:text-lg font-bold tabular-nums text-slate-800 break-all">{fmt(coop.value)}</p>
+                      </div>
+                      <div className="rounded-xl bg-slate-50 p-3 min-w-0">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Capital</p>
+                        <p className="mt-1 text-sm sm:text-lg font-bold tabular-nums text-slate-800 break-all">{fmt(coop.capital)}</p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">{coop.rows.length} member{coop.rows.length !== 1 ? "s" : ""}</p>
+                      </div>
+                      <div className={`rounded-xl p-3 min-w-0 ${coop.gain >= 0 ? "bg-emerald-50" : "bg-red-50"}`}>
+                        <p className={`text-[11px] font-semibold uppercase tracking-wide ${coop.gain >= 0 ? "text-emerald-600" : "text-red-600"}`}>{coop.gain >= 0 ? "Gain" : "Loss"}</p>
+                        <p className={`mt-1 text-sm sm:text-lg font-bold tabular-nums break-all ${coop.gain >= 0 ? "text-emerald-700" : "text-red-700"}`}>
+                          {coop.gain >= 0 ? "+" : "−"}{fmt(Math.abs(coop.gain))}
+                        </p>
+                        {coop.pct !== null && (
+                          <p className={`text-[11px] mt-0.5 tabular-nums ${coop.gain >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                            {coop.gain >= 0 ? "+" : "−"}{Math.abs(coop.pct).toFixed(1)}%
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Where the co-op's value sits: in hand vs still with borrowers. */}
+                    <div>
+                      <div className="flex h-2 rounded-full overflow-hidden bg-slate-100" role="img"
+                        aria-label={`Cash on hand ${fmt(coop.cash)}, principal with borrowers ${fmt(coop.principal)}`}>
+                        <div className="bg-emerald-500" style={{ width: `${coop.value > 0 ? Math.max(0, Math.min(100, coop.cash / coop.value * 100)) : 0}%` }} />
+                        <div className="bg-sky-400 flex-1" />
+                      </div>
+                      <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>Cash on hand <span className="font-semibold text-slate-700 tabular-nums">{fmt(coop.cash)}</span></span>
+                        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-sky-400 shrink-0"></span>Principal with borrowers <span className="font-semibold text-slate-700 tabular-nums">{fmt(coop.principal)}</span></span>
+                      </div>
+                    </div>
+                  </>)}
+                </div>
+
+                {members.length > 0 && (<>
+                  <div className="overflow-x-auto border-t border-slate-100">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
+                        <tr>
+                          <th scope="col" className="text-left font-semibold px-4 py-2">Member</th>
+                          <th scope="col" className="hidden sm:table-cell text-right font-semibold px-3 py-2">Capital</th>
+                          <th scope="col" className="hidden md:table-cell text-right font-semibold px-3 py-2">Cash</th>
+                          <th scope="col" className="hidden md:table-cell text-right font-semibold px-3 py-2">Principal</th>
+                          <th scope="col" className="text-right font-semibold px-3 py-2">Value today</th>
+                          <th scope="col" className="text-right font-semibold px-4 py-2">{coop.gain >= 0 ? "Gain" : "Gain / loss"}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {coop.rows.map(r => (
+                          <tr key={r.id || r.name}>
+                            <td className="px-4 py-2.5 max-w-[9rem] sm:max-w-none">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span className="hidden sm:flex"><Avatar name={r.name} size="w-8 h-8" /></span>
+                                <div className="min-w-0">
+                                  <p className="font-medium text-slate-800 truncate">{r.name}</p>
+                                  <p className="text-[11px] text-slate-400 tabular-nums truncate">
+                                    <span className="sm:hidden">{fmt(r.capital)} · </span>{(r.share * 100).toFixed(1)}% share
+                                  </p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums text-slate-500">{fmt(r.capital)}</td>
+                            <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-slate-500">{fmt(r.cash)}</td>
+                            <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-slate-500">{fmt(r.principal)}</td>
+                            <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-800 whitespace-nowrap">{fmt(r.value)}</td>
+                            <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                              <p className={`tabular-nums font-semibold ${r.gain >= 0 ? "text-emerald-700" : "text-red-600"}`}>{r.gain >= 0 ? "+" : "−"}{fmt(Math.abs(r.gain))}</p>
+                              <p className={`text-[11px] tabular-nums ${r.gain >= 0 ? "text-emerald-600" : "text-red-500"}`}>{r.gain >= 0 ? "+" : "−"}{Math.abs(r.pct).toFixed(1)}%</p>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="border-t border-slate-100 bg-slate-50/60">
+                        <tr>
+                          <th scope="row" className="text-left px-4 py-2.5 text-xs font-semibold text-slate-600">Total</th>
+                          <td className="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums text-xs font-semibold text-slate-600">{fmt(coop.capital)}</td>
+                          <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-xs font-semibold text-slate-600">{fmt(coop.cash)}</td>
+                          <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums text-xs font-semibold text-slate-600">{fmt(coop.principal)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-800 whitespace-nowrap">{fmt(coop.value)}</td>
+                          <td className={`px-4 py-2.5 text-right tabular-nums font-semibold whitespace-nowrap ${coop.gain >= 0 ? "text-emerald-700" : "text-red-600"}`}>{coop.gain >= 0 ? "+" : "−"}{fmt(Math.abs(coop.gain))}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  <div className="px-4 py-3 border-t border-slate-100 space-y-1.5">
+                    {Math.abs(coop.capital - coop.capitalOnRecord) >= 0.01 && (
+                      <p className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-800 leading-relaxed">
+                        Members' capital adds up to <span className="font-semibold tabular-nums">{fmt(coop.capital)}</span>, but your records show <span className="font-semibold tabular-nums">{fmt(coop.capitalOnRecord)}</span> (initial capital + capital added). <button onClick={openMembers} className="font-semibold underline">Update members</button> so every share is right.
+                      </p>
+                    )}
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Interest collected to date <span className="font-semibold text-slate-500 tabular-nums">{fmt(coop.interestEarned)}</span>
+                      {coop.withdrawn > 0 && <> · withdrawn <span className="font-semibold text-slate-500 tabular-nums">{fmt(coop.withdrawn)}</span> (already out of the pool)</>}.
+                      {" "}Future interest isn't counted — only cash in hand and principal borrowers still owe. Each member's value is the total × their share of capital.
+                    </p>
+                  </div>
+                </>)}
+              </div>
+
               {/* ── 3 · LENDING ACTIVITY — released vs collected, then the money
                      that is out with borrowers and is NOT available cash. ── */}
               <div className={`${cardCls} p-4 space-y-3.5 md:col-span-6`}>
@@ -4341,6 +4580,72 @@ function App() {
                 </div>
                 <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">Cash you already held before any of these records. Every balance on this screen is counted up from here.</p>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Co-op members ── names and capital; Cash Flow splits the pool by
+          each member's share of the capital entered here. */}
+      {membersOpen && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 animate-fade-in"
+          onClick={() => setMembersOpen(false)}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Co-op members"
+            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-xl max-h-[88vh] overflow-y-auto overscroll-contain scroll-ios animate-sheet-up"
+            style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)" }}>
+            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-5 pt-3 pb-3 border-b border-slate-50">
+              <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto mb-3 sm:hidden" />
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800">Co-op members</p>
+                  <p className="text-xs text-slate-400">Each member's name and the capital they put in</p>
+                </div>
+                <button onClick={() => setMembersOpen(false)} aria-label="Close"
+                  className="w-8 h-8 -mr-1 rounded-full bg-slate-100 text-slate-500 text-sm flex items-center justify-center active:bg-slate-200 transition shrink-0">✕</button>
+              </div>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+                <span className="flex-1">Name</span>
+                <span className="w-28 shrink-0 text-right">Capital</span>
+                <span className="w-9 shrink-0"></span>
+              </div>
+              <div className="space-y-2">
+                {memberDraft.map((m, i) => (
+                  <div key={m.id} className="flex items-center gap-2">
+                    <input className={`${inputCls} flex-1 min-w-0`} value={m.name} placeholder={`Member ${i + 1}`}
+                      aria-label={`Member ${i + 1} name`} onChange={e => editMember(m.id, { name: e.target.value })} />
+                    <input type="number" inputMode="decimal" className={`${inputCls} w-28 shrink-0 text-right`} value={m.capital}
+                      aria-label={`Member ${i + 1} capital`} onChange={e => editMember(m.id, { capital: e.target.value })} />
+                    <button onClick={() => setMemberDraft(d => d.filter(x => x.id !== m.id))} aria-label={`Remove member ${i + 1}`}
+                      className="w-9 h-9 shrink-0 rounded-xl text-slate-400 flex items-center justify-center active:bg-slate-100 transition">
+                      <i data-lucide="trash-2" className="w-4 h-4"></i>
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button onClick={() => setMemberDraft(d => [...d, { id: uuid(), name: "", capital: "30000" }])}
+                className="w-full py-2.5 rounded-xl border border-dashed border-slate-200 text-sm font-medium text-slate-500 flex items-center justify-center gap-1.5 active:bg-slate-50 transition">
+                <i data-lucide="plus" className="w-4 h-4"></i>Add member
+              </button>
+              {(() => {
+                const total = round2(memberDraft.reduce((s, m) => s + (Number(m.capital) || 0), 0));
+                return (
+                  <div className="rounded-xl bg-slate-50 px-3.5 py-3 space-y-1">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-xs text-slate-500">{memberDraft.length} member{memberDraft.length !== 1 ? "s" : ""} · total capital</span>
+                      <span className="text-sm font-bold tabular-nums text-slate-800">{fmt(total)}</span>
+                    </div>
+                    {coop.capitalOnRecord > 0 && Math.abs(total - coop.capitalOnRecord) >= 0.01 && (
+                      <p className="text-[11px] text-amber-700 leading-relaxed">Your records show {fmt(coop.capitalOnRecord)} (initial capital + capital added).</p>
+                    )}
+                  </div>
+                );
+              })()}
+              <button onClick={saveMembers} disabled={membersBusy}
+                className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 disabled:opacity-60 text-white text-sm font-semibold transition">
+                {membersBusy ? "Saving…" : "Save members"}
+              </button>
             </div>
           </div>
         </div>

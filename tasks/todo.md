@@ -44,3 +44,25 @@
   period totals, ledger, charts and running balance all derive from it. No other cash-flow code reads `startDate`.
 - [x] Backfill (user chose "Same as Start Date"): `update loans set release_date = start_date where release_date is null` → 28/28 filled.
 - **Follow-up:** Edit loans whose money actually went out on a different day; cash flow moves the release to that date.
+
+# Cash Flow: co-op Members' share table
+
+- [x] DB: `settings.members jsonb not null default '[]'` + check `jsonb_typeof = 'array'` (existing own_settings RLS covers it)
+- [x] api.fetchAll maps `members`; api.setMembers upserts only that column (opening balance untouched)
+- [x] `splitCents` / `memberShares` pure helpers: pool = cash on hand + outstanding principal (no future interest),
+      split by capital share to the centavo (largest remainder, rows always sum to the total)
+- [x] Cash Flow card "Members' share" (full width, as at today): Co-op value / Capital / Gain tiles, cash-vs-principal
+      bar, table (Member · Capital · Cash · Principal · Value today · Gain ₱/%), total row, notes
+      (interest collected, withdrawn, capital-mismatch warning), share/copy text for group chat
+- [x] Members editor sheet (prefilled 8 × ₱30,000 on first setup; name/capital, add/remove, validation)
+- [x] sw.js → v26
+
+## Review
+
+- **Tests run:** esbuild JSX parse OK; `memberShares` example 8 × 30k on ₱360k → ₱45,000 each (+₱15,000, +50%);
+  20,000 random splits → member rows always sum exactly to totals; equal capital → ≤ 1 centavo apart.
+  Real data: c4444d87 book → ₱197,297.67 (= 240k + 18k added + 11,376 interest − 72,078.33 withdrawn), −17.8%.
+- **Known risks:** Not clicked through in a browser. Admin's Cash Flow mixes every user's loans/entries with only the
+  admin's own opening balance (cash shows −₱132,757), so the members card is only meaningful on the co-op's own book.
+  Withdrawals reduce everyone's value; if a withdrawal was a capital return, members' capital should be lowered.
+- **Follow-up:** Decide which account is the co-op book; commit + push; set up members on that account.
