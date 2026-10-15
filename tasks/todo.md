@@ -204,3 +204,56 @@ row), but the passed period's interest is not collected — it is added to the n
   `hasWitnesses: false`; older agreement with a saved witness opens with the switch on and prints it; no errors.
 - **Known risks:** Switching off hides but keeps witness data (switching on restores it). Not tried on a phone.
 - **Follow-up:** Commit + push; on the phone tap Update and print an agreement with and without witnesses.
+
+# Review: javilat@ohana.com cash on hand "not tally" (read-only, no changes made)
+
+- [x] App figure rebuilt in SQL: 240,000 opening − 275,083 released + 113,216 collected − 72,078.33 withdrawn = ₱6,054.67
+- [x] No code fault: the figure is a plain sum of records (user role → own rows only)
+- [x] Live edit seen mid-review (13:01–13:03 UTC, iPhone, live app): OL-0006's 6 payments deleted and being re-entered with real dates
+- [ ] Awaiting user: real cash count; confirm Withdrawal "Cebu Hatian" ₱72,078.33; confirm 4 pre-opening 0% loans (OL-0008/09/10/11, ₱111,083);
+      fix release dates on 7 loans whose release = first due date (OL-0005/06/13/14/15/16/18)
+- **Side finding (not javilat):** an admin login's Cash Flow mixes every account's loans/payments/transactions
+  (`api.fetchAll` filters only settings by user) against the admin's own opening balance.
+- [x] User: real cash Aug 29 = ₱7,042. App at Aug 29 (current data) = ₱123,583.66 → gap ₱116,541.66.
+      Forward from ₱7,042 the recorded Aug 30 → Oct 15 entries end at −₱110,486.99 (impossible) → dates/records wrong.
+      If OL-0013/14/15 (₱43,000, entered Aug 27–29, dated Sep 15) and the Cebu Hatian (₱72,078.33, dated Sep 17)
+      both happened by Aug 29, the gap is ₱1,463.33 and cash today ≈ ₱4,591.34 (app shows ₱6,054.67).
+      Logs (from Aug 27): a loan deleted Aug 27 16:45 UTC; a payment posted Aug 29 03:44 UTC, since deleted.
+- [x] Discrepancy audit (real app.js engine, stubbed DB, no writes): all 18 payments equal their installment exactly; no
+      duplicates, none before release, no overpayment; nothing overdue. App hero ₱6,054.67.
+      During review (not by Claude) the withdrawal was re-entered as 2026-03-03, note blank.
+      Result: unexplained ₱1,463.33 on/before Aug 29 (app ₱8,505.33 vs real ₱7,042 once OL-0013/14/15 count as released by
+      Aug 29); after Aug 29 the records run to ₱4,591.34 vs app ₱6,054.67 — the same ₱1,463.33.
+      Also: 7 loans' release date = first due date; OL-0016 rate 10.8 on Monthly = 21.6% (₱4,320) — confirm intended.
+- [x] Formula review (app.js:2065-2082): Cash on Hand = Initial capital + payments (>0) + manual in − loan amounts (at release
+      date) − manual out, over ALL records. Matches SQL (₱6,054.67). Findings: (1) no date ≤ today filter and no max on the
+      release/payment/transaction date inputs → future-dated entries count immediately (none for javilat today);
+      (2) admin login sums every account against the admin's own capital; (3) deleting a loan cascades its payments, so it
+      rewrites cash history (FK payments_loan_id_fkey ON DELETE CASCADE). No code changed.
+- [x] Excel extract (read-only): C:\Users\Aynne\Desktop\Javilat Cash Flow 2026-10-15.xlsx (outside the repo — holds customer data).
+      Sheets: Cash Flow (app order, ties to ₱6,054.67), By Actual Release (Aug 29 check → ₱1,463.33), Loans (left ₱189,379 = app
+      "Expected back"). Excel recalc: 0 formula errors; insert-row test (+₱18,000 capital) → ₱24,054.67.
+
+# Cash Flow: running balance on each date header (Cash movements)
+
+- [x] Day header shows the end-of-day running balance instead of the day's net / "+expected" sum
+- [x] Balance comes from the full chain (not the filtered rows), so filters never change a date's balance
+- [x] With "Show projected" on, dates whose balance includes expected dues read "Projected" in grey; negative balance in red
+- [x] sw.js → v33
+- [x] Verify: esbuild parse; headless Chrome with javilat snapshot — header = closing balance per date (all-time + a month),
+      filter "Money in" keeps the same balances, projected on, 360px no overflow, no console errors
+
+## Review
+
+- **Summary:** Cash movements day headers now read "Balance ₱X" — the running balance at the close of that date — instead
+  of the day's +/− net and "+expected". Balances come from a `closing` map built over the full chain (`chrono`), so filters
+  and the month picker never change a date's balance. With Show projected on, dates whose balance includes expected dues
+  read "Projected ₱X" in grey; a negative actual balance is red. Removed the now-unused day.net / expected / hasActual.
+- **Files changed:** app.js (cashflow memo + Cash movements header), sw.js (v33)
+- **Tests run:** esbuild parse OK. Headless Chrome, real app.js, javilat snapshot, 360px: 12/12 — 23 headers = 23 dates,
+  each equal to an independently computed closing balance; newest = Cash on Hand ₱6,054.67; header = top row's bal;
+  "Money in" filter shows 13 dates with unchanged balances; September view matches; projected on → 16 grey "Projected"
+  dates, past dates unchanged; no overflow; no console errors; no writes.
+- **Known risks:** Not tried on a phone. Pre-existing: within a day, releases are listed before payments, so a row's own
+  "bal" can dip negative mid-day (e.g. Oct 15) even though the day closes positive.
+- **Follow-up:** Commit + push; on the phone tap Update and open Cash Flow.
