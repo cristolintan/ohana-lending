@@ -2114,6 +2114,16 @@ function App() {
     }
     chrono.forEach((t, i) => { t.order = i; });
 
+    // Each date's closing balance, read off the full chain — never the filtered
+    // ledger, so narrowing the list can't change what a date closed at. Once an
+    // expected due has entered the chain, every later balance is a projection.
+    const closing = new Map();
+    let projectedYet = false;
+    chrono.forEach(t => {
+      if (t.projected) projectedYet = true;
+      closing.set(t.date, { balance: t.balance, projected: projectedYet });
+    });
+
     // ── Period totals (actuals only) ──
     const collected = inRange.filter(t => t.kind === "Collection").reduce((s, t) => s + t.inflow, 0);
     const collectedCount = inRange.filter(t => t.kind === "Collection").length;
@@ -2159,13 +2169,8 @@ function App() {
       d.rows.push(t);
     });
     const days = [...dayMap.values()].sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
-    // Actual cash and expected dues are totalled apart: a day's net must never
-    // fold in money that hasn't arrived.
-    days.forEach(d => {
-      d.net = d.rows.filter(t => !t.projected).reduce((s, t) => s + t.inflow - t.outflow, 0);
-      d.expected = d.rows.filter(t => t.projected).reduce((s, t) => s + t.inflow, 0);
-      d.hasActual = d.rows.some(t => !t.projected);
-    });
+    // Each day's heading carries the running balance at its close.
+    days.forEach(d => { const c = closing.get(d.date); d.balance = c.balance; d.projected = c.projected; });
 
     // ── Chart buckets. Same rows, three groupings — day, week, or month. ──
     const events = [...inRange, ...projectedInRange].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
@@ -4131,9 +4136,9 @@ function App() {
                       <section key={day.date}>
                         <div className="sticky top-0 z-[1] px-4 py-1.5 bg-slate-50 border-y border-slate-100 flex items-center justify-between">
                           <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{day.heading}</p>
-                          <p className="text-[11px] font-semibold tabular-nums flex items-center gap-1.5">
-                            {day.hasActual && <span className={day.net >= 0 ? "text-emerald-600" : "text-amber-600"}>{day.net >= 0 ? "+" : "−"}{fmt(Math.abs(day.net))}</span>}
-                            {day.expected > 0 && <span className="text-slate-400 font-medium">+{fmt(day.expected)} expected</span>}
+                          <p className={`text-[11px] font-semibold tabular-nums ${
+                            day.projected ? "text-slate-400" : day.balance < -0.005 ? "text-red-600" : "text-slate-700"}`}>
+                            <span className="font-medium text-slate-400">{day.projected ? "Projected" : "Balance"}</span> {fmt(day.balance)}
                           </p>
                         </div>
                         <ul className="divide-y divide-slate-50">
