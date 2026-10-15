@@ -159,3 +159,48 @@ row), but the passed period's interest is not collected — it is added to the n
 - **Known risks:** Not tried on a phone. A waiver placed by payment order (same as Pass/Minimum Due); a later edit to
   earlier payments can move it. overdue-check needs a redeploy for waivers (else the server sees principal-only
   and flags the interest as overdue). → DEPLOYED (user approved): overdue-check v10, verify_jwt=false, same layout.
+
+# Agreement: Guarantor optional
+
+- [x] `hasGuarantor` flag on the agreement (saved with it). Older saved agreements: on if any guarantor field/signature is filled.
+- [x] Agreement Details: "Add guarantor (optional)" toggle; guarantor Name / Address / Gov't ID only when on
+- [x] Signatures: Guarantor Signature only when on
+- [x] Document (print + PDF): GUARANTOR clause and guarantor signature row only when on
+- [x] sw.js → v32
+- [x] Verify: esbuild parse; headless Chrome (real app.js, stub Supabase) — off/on/toggle, old agreement with guarantor
+
+## Review
+
+- **Summary:** Guarantor is now opt-in on the loan agreement. Off: no guarantor inputs, no Guarantor Signature pad,
+  and the printed/PDF agreement drops the GUARANTOR (JOINT AND SOLIDARY LIABILITY) clause and the guarantor signature
+  line. Toggle stored as `hasGuarantor` inside the agreement JSON (no DB change).
+- **Files changed:** app.js (`AgreementView`), sw.js (v32)
+- **Tests run:** esbuild JSX parse OK. Headless Chrome, real index.html + app.js, stubbed Supabase, 360px: 16/16 checks —
+  new agreement defaults off with zero "Guarantor" mentions in form or document; toggle on shows 3 inputs + signature
+  + clause; typing keeps focus; toggle off removes all; Save sends `hasGuarantor: false`; an older saved agreement with
+  guarantor details (no flag) opens with the toggle on and prints them; no overflow; no console errors.
+- **Known risks:** Turning the toggle off hides guarantor details but keeps them in the saved data (turning it back on
+  restores them). Not tried on a phone. Pre-existing: the schedule table's Due Date column is clipped at 360px on screen.
+- **Follow-up:** Commit + push; on the phone tap Update, open an agreement without a guarantor and Print/Download PDF.
+
+# Agreement: Witnesses optional (same pattern as guarantor)
+
+- [x] `hasWitnesses` flag saved with the agreement; older agreements: on if any witness name/signature is filled
+- [x] Agreement Details: "Add witnesses (optional)" toggle; Witness 1/2 Name only when on (shared toggle helper with guarantor)
+- [x] Signatures: Witness 1/2 Signature only when on
+- [x] Document: "Signed in the presence of" block only when on (and, as before, only named witnesses)
+- [x] sw.js stays v32 (guarantor change not shipped yet — both go out together)
+- [x] Verify: esbuild parse; extend headless Chrome harness
+
+## Review
+
+- **Summary:** Witnesses are opt-in like the guarantor. Off: no Witness 1/2 Name inputs, no witness signature pads, no
+  "Signed in the presence of" block in the print/PDF. On: unchanged from before (only named witnesses print).
+  Both switches share one `toggle(key, onLabel, offLabel)` helper. `hasWitnesses` saved in the agreement JSON.
+- **Files changed:** app.js (`AgreementView`); sw.js already v32 from the guarantor change (both unshipped).
+- **Tests run:** esbuild JSX parse OK. Headless Chrome harness, 360px: 27/27 checks (16 guarantor + 11 witness) —
+  new agreement: witness switch off, zero witness labels, zero witness text in the document; on: 2 names + 2 pads;
+  typing keeps focus; Witness 1 only → document shows Witness 1 only; off removes all; Save sends
+  `hasWitnesses: false`; older agreement with a saved witness opens with the switch on and prints it; no errors.
+- **Known risks:** Switching off hides but keeps witness data (switching on restores it). Not tried on a phone.
+- **Follow-up:** Commit + push; on the phone tap Update and print an agreement with and without witnesses.
