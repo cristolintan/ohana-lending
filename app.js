@@ -1166,16 +1166,22 @@ function SheetRow({ icon, label, hint, danger, disabled, onClick }) {
 
 // ─── Loan Agreement (fill-in form + signatures + printable document) ──────────
 function AgreementView({ loan, fmt, onBack, onSave }) {
-  const [f, setF] = useState(() => ({
-    lenderName: "Liezel Anne Davalos",
-    lenderAddress: "",
-    lenderId: "",
-    borrowerAddress: "", borrowerId: "", purpose: "",
-    guarantorName: "", guarantorAddress: "", guarantorId: "",
-    witness1: "", witness2: "", agreementDate: today(),
-    sigLender: "", sigBorrower: "", sigGuarantor: "", sigWitness1: "", sigWitness2: "",
-    ...(loan.agreement || {})
-  }));
+  const [f, setF] = useState(() => {
+    const saved = loan.agreement || {};
+    return {
+      lenderName: "Liezel Anne Davalos",
+      lenderAddress: "",
+      lenderId: "",
+      borrowerAddress: "", borrowerId: "", purpose: "",
+      // Guarantor and witnesses are optional. Agreements saved before these flags existed keep any that were filled in.
+      hasGuarantor: !!(saved.guarantorName || saved.guarantorAddress || saved.guarantorId || saved.sigGuarantor),
+      hasWitnesses: !!(saved.witness1 || saved.witness2 || saved.sigWitness1 || saved.sigWitness2),
+      guarantorName: "", guarantorAddress: "", guarantorId: "",
+      witness1: "", witness2: "", agreementDate: today(),
+      sigLender: "", sigBorrower: "", sigGuarantor: "", sigWitness1: "", sigWitness2: "",
+      ...saved
+    };
+  });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const [busy, setBusy] = useState(false);
 
@@ -1218,13 +1224,28 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
   const firstDue = sched.rows.length ? fmtDate(sched.rows[0].due) : "—";
   const lastDue = sched.rows.length ? fmtDate(sched.rows[sched.rows.length - 1].due) : "—";
 
-  const fields = [
+  const partyFields = [
     ["Lender Name", "lenderName"], ["Lender Address", "lenderAddress"], ["Lender Gov't ID No.", "lenderId"],
     ["Borrower Address", "borrowerAddress"], ["Borrower Gov't ID No.", "borrowerId"],
-    ["Purpose of Loan", "purpose"],
-    ["Guarantor Name", "guarantorName"], ["Guarantor Address", "guarantorAddress"], ["Guarantor Gov't ID No.", "guarantorId"],
-    ["Witness 1 Name", "witness1"], ["Witness 2 Name", "witness2"]
+    ["Purpose of Loan", "purpose"]
   ];
+  const guarantorFields = [["Guarantor Name", "guarantorName"], ["Guarantor Address", "guarantorAddress"], ["Guarantor Gov't ID No.", "guarantorId"]];
+  const witnessFields = [["Witness 1 Name", "witness1"], ["Witness 2 Name", "witness2"]];
+  // Called as a function, not rendered as <Field/>: a component defined here would remount on every keystroke and drop focus.
+  const field = ([lbl, key]) => (
+    <div key={key}>
+      <label className={labelCls}>{lbl}</label>
+      <input className={inputCls} value={f[key]} onChange={e => set(key, e.target.value)} />
+    </div>
+  );
+  // On/off switch for an optional party; called as a function, like `field`.
+  const toggle = (key, onLabel, offLabel) => (
+    <button type="button" onClick={() => set(key, !f[key])} aria-pressed={f[key]}
+      className={`w-full py-2.5 rounded-xl text-xs font-semibold transition ${
+        f[key] ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-500 active:bg-slate-200"}`}>
+      {f[key] ? onLabel : offLabel}
+    </button>
+  );
 
   const Sig = ({ src, name, role }) => (
     <div className="text-center">
@@ -1252,12 +1273,11 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
           <label className={labelCls}>Agreement Date</label>
           <input type="date" className={inputCls} value={f.agreementDate} onChange={e => set("agreementDate", e.target.value)} />
         </div>
-        {fields.map(([lbl, key]) => (
-          <div key={key}>
-            <label className={labelCls}>{lbl}</label>
-            <input className={inputCls} value={f[key]} onChange={e => set(key, e.target.value)} />
-          </div>
-        ))}
+        {partyFields.map(field)}
+        {toggle("hasGuarantor", "✓ With guarantor", "Add guarantor (optional)")}
+        {f.hasGuarantor && guarantorFields.map(field)}
+        {toggle("hasWitnesses", "✓ With witnesses", "Add witnesses (optional)")}
+        {f.hasWitnesses && witnessFields.map(field)}
       </div>
 
       <div className="no-print bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
@@ -1265,9 +1285,13 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
         <p className="text-xs text-slate-400 -mt-2">Tap Draw to sign in a popup, or Upload an image — saved with the agreement.</p>
         <SignatureField label="Lender Signature" value={f.sigLender} onChange={v => set("sigLender", v)} />
         <SignatureField label="Borrower Signature" value={f.sigBorrower} onChange={v => set("sigBorrower", v)} />
-        <SignatureField label="Guarantor Signature" value={f.sigGuarantor} onChange={v => set("sigGuarantor", v)} />
-        <SignatureField label="Witness 1 Signature" value={f.sigWitness1} onChange={v => set("sigWitness1", v)} />
-        <SignatureField label="Witness 2 Signature" value={f.sigWitness2} onChange={v => set("sigWitness2", v)} />
+        {f.hasGuarantor && <SignatureField label="Guarantor Signature" value={f.sigGuarantor} onChange={v => set("sigGuarantor", v)} />}
+        {f.hasWitnesses && (
+          <>
+            <SignatureField label="Witness 1 Signature" value={f.sigWitness1} onChange={v => set("sigWitness1", v)} />
+            <SignatureField label="Witness 2 Signature" value={f.sigWitness2} onChange={v => set("sigWitness2", v)} />
+          </>
+        )}
       </div>
 
       <div id="agreement-print" className="bg-white rounded-2xl border border-slate-100 p-6 shadow-sm text-slate-800 text-sm leading-relaxed space-y-2"
@@ -1340,9 +1364,13 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
         <H>GOVERNING LAW</H>
         <p>The laws of the Republic of the Philippines will govern this Agreement, and its provisions will be enforced in accordance with the country's laws, including those related to small claims procedures.</p>
 
-        <H>GUARANTOR (JOINT AND SOLIDARY LIABILITY)</H>
-        <p>For value received, the undersigned Guarantor hereby binds himself/herself jointly and severally with the Borrower for the full and prompt payment of all obligations under this Agreement. The liability is direct and immediate; the Lender is not required to exhaust remedies against the Borrower before proceeding against the Guarantor; and this guarantee remains valid until full payment of the loan.</p>
-        <p><b>Guarantor: {f.guarantorName || "_____"} — {f.guarantorAddress || "_____"} — Gov't ID No. {f.guarantorId || "_____"}</b></p>
+        {f.hasGuarantor && (
+          <>
+            <H>GUARANTOR (JOINT AND SOLIDARY LIABILITY)</H>
+            <p>For value received, the undersigned Guarantor hereby binds himself/herself jointly and severally with the Borrower for the full and prompt payment of all obligations under this Agreement. The liability is direct and immediate; the Lender is not required to exhaust remedies against the Borrower before proceeding against the Guarantor; and this guarantee remains valid until full payment of the loan.</p>
+            <p><b>Guarantor: {f.guarantorName || "_____"} — {f.guarantorAddress || "_____"} — Gov't ID No. {f.guarantorId || "_____"}</b></p>
+          </>
+        )}
 
         <H>ACKNOWLEDGMENT</H>
         <p>By signing below, the Parties acknowledge that they have read, understood, and voluntarily agreed to all terms and conditions of this Agreement.</p>
@@ -1351,13 +1379,15 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
           <Sig src={f.sigLender} name={f.lenderName} role="Lender" />
           <Sig src={f.sigBorrower} name={loan.borrower} role="Borrower" />
         </div>
-        <div className="grid grid-cols-2 gap-6 pt-6">
-          <Sig src={f.sigGuarantor} name={f.guarantorName} role="Guarantor" />
-          <div></div>
-        </div>
+        {f.hasGuarantor && (
+          <div className="grid grid-cols-2 gap-6 pt-6">
+            <Sig src={f.sigGuarantor} name={f.guarantorName} role="Guarantor" />
+            <div></div>
+          </div>
+        )}
 
        
-        {(f.witness1 || f.witness2) && (
+        {f.hasWitnesses && (f.witness1 || f.witness2) && (
           <>
             <p className="pt-6">Signed in the presence of:</p>
             <div className="grid grid-cols-2 gap-6 pt-2">
