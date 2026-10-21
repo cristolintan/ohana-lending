@@ -8,3 +8,9 @@ verify_jwt = true
 # protected by the CRON_SECRET header instead, so JWT verification is disabled.
 [functions.overdue-check]
 verify_jwt = false
+
+# agreement-sign is opened by borrowers/guarantors from an emailed link — they
+# have no account. The 256-bit link token (stored only as a SHA-256 hash) is
+# the credential, checked inside the function, so JWT verification is disabled.
+[functions.agreement-sign]
+verify_jwt = false

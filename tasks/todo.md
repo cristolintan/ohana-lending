@@ -257,3 +257,49 @@ row), but the passed period's interest is not collected — it is added to the n
 - **Known risks:** Not tried on a phone. Pre-existing: within a day, releases are listed before payments, so a row's own
   "bal" can dip negative mid-day (e.g. Oct 15) even though the day closes positive.
 - **Follow-up:** Commit + push; on the phone tap Update and open Cash Flow.
+
+# Loan agreement: send to sign by email (plan: ~/.claude/plans/cozy-hatching-lighthouse.md — approved)
+
+- [x] DB: `signing_requests` table + RLS (owner/admin; insert only status=sent w/o signature; update only → cancelled); advisors clean
+- [x] Edge function `agreement-sign` (verify_jwt=false): get / sign; atomic sent→signed; evidence; push owner; config.toml
+- [x] app.js: `AgreementDocument` + shared PDF export; Borrower/Guarantor Email fields; Send-to-sign sheet (mailto / share / copy);
+      status lines; remote signatures in document; `SignPage` mounted for `?sign=`
+- [x] sw.js → v34; supabase/E_SIGN_SETUP.md (no secrets)
+- [x] Verify: esbuild; headless (stub) app + sign page; live end-to-end on a temporary admin test loan, then delete it
+
+## Review
+
+- **Summary:** "✉ Send to sign by email" under the Borrower / Guarantor signature. Saves the agreement, creates a
+  private 14-day link (token made in the browser; only its SHA-256 stored), then opens the lender's email app
+  pre-filled (also Share / Copy link). `?sign=<token>` mounts `SignPage` (no login): agreement as sent → draw,
+  type name, consent → Sign. Status in the app: sent / opened / signed / expired, "changed since sent" warning,
+  Cancel link, Send again. Remote signature shown on the agreement + print/PDF ("Signed electronically <date>").
+  The printable document is now `AgreementDocument` (shared); PDF export is `exportAgreementPdf` (shared).
+  Signature previews keep white "paper" in dark mode (`.sig-paper`).
+- **Files changed:** app.js, index.html (.sig-paper), sw.js (v34), supabase/config.toml,
+  supabase/functions/agreement-sign/index.ts (new), supabase/E_SIGN_SETUP.md (new)
+- **Live Supabase (approved plan):** table `signing_requests` + RLS + column grants; function `agreement-sign` v1
+  (verify_jwt=false). Advisors: nothing new beyond the project-wide "anonymous access" note every table has.
+- **Tests run:** esbuild parse OK; moved document diffed vs HEAD — identical except the two new signature captions.
+  Headless (stubbed DB): e-sign 39/39, agreement 27/27 (updated for Guarantor Email), running balance 12/12.
+  Live function: 10/10 (get, consent/PNG/name validation, sign, double-sign refused, signed copy, expired, cancelled);
+  evidence row checked; RLS as signed-in user (rolled back): can't insert signed, flip to signed, overwrite signature,
+  cancel a signed one, or delete; normal insert OK; anon can't read. Test loan TEST-ESIGN deleted (cascade).
+- **Known risks:** Not tried on a phone (mailto/share on iOS). Push on signing not exercised live (admin has no
+  subscribed device). Notarization still in person. A link exposes that agreement to whoever holds it until expiry.
+  Found a real signed request on OL-0026 (javilat, 21 Oct 10:29 UTC) — left untouched.
+- **Follow-up:** Commit + push (GitHub Pages) so links open the new SignPage; rotate the secrets in PUSH_SETUP.md
+  (public repo) — needs user OK.
+
+# Agreement: "Remove" for a remote (emailed-link) signature
+
+- [ ] DB (live, after user OK): status 'revoked' + revoked_at; trigger enforces transitions (sent→signed/cancelled,
+      signed→revoked only) and stamps revoked_at; app may update status to cancelled|revoked only (RLS)
+- [x] agreement-sign: revoked link → "signature was removed" message (v2)
+- [x] app.js: Remove button on the signed card (confirm) → revoke → falls back to drawn signature + Send again;
+      "Removed signature by X (signed …) on …" line; document stops using it
+- [ ] Verify: esbuild; stub tests (remove/confirm/cancel-dialog/doc); live: revoke allowed, revoked→signed and
+      signed→cancelled blocked, revoked link message; temp test loan deleted
+- Progress: app + function code done; stub tests 45/45 (6 new: confirm-cancel no-op, revoke write, fallback UI, doc
+  without signature, signer 'revoked' message). SQL written to supabase/E_SIGN_SETUP.md. **Live DB + function v2 waiting
+  for user OK.**

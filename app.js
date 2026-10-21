@@ -333,6 +333,27 @@ const api = {
   async setQueueStatus(id, status) { const { error } = await sb.from("queue").update({ status }).eq("id", id); if (error) throw error; },
   async delQueue(id) { const { error } = await sb.from("queue").delete().eq("id", id); if (error) throw error; },
   async saveAgreement(loanId, data) { const { error } = await sb.from("agreements").upsert({ loan_id: loanId, data, updated_at: new Date() }, { onConflict: "loan_id" }); if (error) throw error; },
+  // Remote signing. The app may create and cancel requests; only the
+  // agreement-sign function can mark one signed (RLS + column grants).
+  async listSigning(loanId) {
+    const { data, error } = await sb.from("signing_requests")
+      .select("id,role,signer_name,signer_email,status,doc_hash,expires_at,created_at,opened_at,signed_at,signature,typed_name,revoked_at")
+      .eq("loan_id", loanId).order("created_at");
+    if (error) throw error;
+    return data || [];
+  },
+  async createSigning(row) { const { error } = await sb.from("signing_requests").insert(row); if (error) throw error; },
+  async cancelSigning(ids) {
+    if (!ids.length) return;
+    const { error } = await sb.from("signing_requests").update({ status: "cancelled" }).in("id", ids);
+    if (error) throw error;
+  },
+  // Takes a remote signature off the agreement. The row (signature, time, IP)
+  // is kept as a record; the server stamps revoked_at.
+  async revokeSigning(id) {
+    const { error } = await sb.from("signing_requests").update({ status: "revoked" }).eq("id", id);
+    if (error) throw error;
+  },
   async setOpening(v) {
     // One settings row per user (user_id is the primary key), so this is a
     // straight upsert on our own row — no lookup, and no chance of writing
@@ -1052,7 +1073,7 @@ function SignatureField({ label, value, onChange }) {
         {value && <button type="button" onClick={() => onChange("")} className="text-xs text-red-400 font-semibold">Remove</button>}
       </div>
       <div className="flex items-stretch gap-3">
-        <div className="flex-1 h-20 rounded-xl border border-slate-200 bg-white flex items-center justify-center overflow-hidden">
+        <div className="sig-paper flex-1 h-20 rounded-xl border border-slate-200 bg-white flex items-center justify-center overflow-hidden">
           {value ? <img src={value} alt="" className="max-h-20" /> : <span className="text-xs text-slate-300">No signature</span>}
         </div>
         <div className="flex flex-col gap-2 justify-center">
@@ -1164,56 +1185,40 @@ function SheetRow({ icon, label, hint, danger, disabled, onClick }) {
   );
 }
 
-// ─── Loan Agreement (fill-in form + signatures + printable document) ──────────
-function AgreementView({ loan, fmt, onBack, onSave }) {
-  const [f, setF] = useState(() => {
-    const saved = loan.agreement || {};
-    return {
-      lenderName: "Liezel Anne Davalos",
-      lenderAddress: "",
-      lenderId: "",
-      borrowerAddress: "", borrowerId: "", purpose: "",
-      // Guarantor and witnesses are optional. Agreements saved before these flags existed keep any that were filled in.
-      hasGuarantor: !!(saved.guarantorName || saved.guarantorAddress || saved.guarantorId || saved.sigGuarantor),
-      hasWitnesses: !!(saved.witness1 || saved.witness2 || saved.sigWitness1 || saved.sigWitness2),
-      guarantorName: "", guarantorAddress: "", guarantorId: "",
-      witness1: "", witness2: "", agreementDate: today(),
-      sigLender: "", sigBorrower: "", sigGuarantor: "", sigWitness1: "", sigWitness2: "",
-      ...saved
-    };
-  });
-  const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
-  const [busy, setBusy] = useState(false);
+// ─── Remote signing ("Send to sign" email link → signer page) ─────────────────
+// Only the borrower and guarantor sign remotely; witnesses sign in person.
+const REMOTE_ROLES = {
+  borrower:  { label: "Borrower",  sigKey: "sigBorrower",  emailKey: "borrowerEmail" },
+  guarantor: { label: "Guarantor", sigKey: "sigGuarantor", emailKey: "guarantorEmail" },
+};
+const SIGN_LINK_DAYS = 14;
+// The loan fields the printed agreement reads — all a signer page needs.
+const SIGNED_LOAN_FIELDS = ["ref", "borrower", "amount", "terms", "flatRate", "dropRate", "frequency", "startDate"];
+const isEmail = s => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
 
-  const exportPdf = async () => {
-    const el = document.getElementById("agreement-print");
-    if (!el) return;
-    if (!window.html2canvas || !window.jspdf) { alert("PDF tools are still loading — connect to the internet once so they cache, then try again."); return; }
-    setBusy(true);
-    try {
-      const canvas = await window.html2canvas(el, { scale: 2, backgroundColor: "#ffffff", useCORS: true });
-      const imgData = canvas.toDataURL("image/png");
-      const pdf = new window.jspdf.jsPDF("p", "mm", "a4");
-      const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight();
-      const imgW = pageW, imgH = canvas.height * imgW / canvas.width;
-      let heightLeft = imgH, position = 0;
-      pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
-      heightLeft -= pageH;
-      while (heightLeft > 0) {
-        position -= pageH;
-        pdf.addPage();
-        pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
-        heightLeft -= pageH;
-      }
-      pdf.save(`Loan Agreement - ${loan.borrower} (${loan.ref || loan.id}).pdf`);
-    } catch (err) {
-      console.error(err);
-      alert("Could not generate the PDF. Try the Print button instead.");
-    } finally {
-      setBusy(false);
-    }
-  };
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+// 32 random bytes, base64url: the link's only secret. The server keeps its SHA-256.
+function newSignToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+// Fingerprint of what a signer agrees to: every agreement field except the
+// signatures and contact emails, plus the loan terms the document prints.
+// A request whose fingerprint differs from today's was signed (or sent) on
+// an older version of the agreement.
+function agreementDocHash(loan, f) {
+  const fields = Object.keys(f).filter(k => !k.startsWith("sig") && !k.endsWith("Email")).sort().map(k => [k, f[k]]);
+  return sha256Hex(JSON.stringify([fields, SIGNED_LOAN_FIELDS.map(k => [k, loan[k] ?? null])]));
+}
 
+// The printable agreement. The lender's screen and the signer page render it
+// from the same data, so a remote signer sees exactly what gets printed.
+// `eSigned` maps "borrower" / "guarantor" to when that person signed through
+// an emailed link; it is captioned under their signature.
+function AgreementDocument({ loan, f, fmt, eSigned = {} }) {
   const sched = useMemo(() => computeCalc({
     amount: loan.amount, terms: loan.terms, flatRate: loan.flatRate,
     frequency: loan.frequency, startDate: loan.startDate,
@@ -1224,18 +1229,316 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
   const firstDue = sched.rows.length ? fmtDate(sched.rows[0].due) : "—";
   const lastDue = sched.rows.length ? fmtDate(sched.rows[sched.rows.length - 1].due) : "—";
 
+  const Sig = ({ src, name, role, signedAt }) => (
+    <div className="text-center">
+      <div className="h-16 flex items-end justify-center">{src ? <img src={src} alt="" className="max-h-16" /> : null}</div>
+      <div className="border-t border-slate-800 pt-1 font-bold">{name || " "}</div>
+      <div className="text-xs italic text-slate-600">{role}</div>
+      {signedAt && <div className="text-[10px] text-slate-500">Signed electronically {fmtDate(new Date(signedAt))}</div>}
+    </div>
+  );
+  const H = ({ children }) => <h2 className="font-bold pt-3">{children}</h2>;
+
+  return (
+    <div id="agreement-print" className="bg-white rounded-2xl border border-slate-100 p-6 shadow-sm text-slate-800 text-sm leading-relaxed space-y-2"
+      style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <h1 className="text-center font-bold text-lg">LOAN AGREEMENT</h1>
+      <div className="h-4"></div>
+      <p>This Loan Agreement is made and entered into this {fmtDate(aDate)}, by and between:</p>
+      <p><b>{f.lenderName || "_____"}</b>, of legal age, Filipino{f.lenderAddress && <>, residing at {f.lenderAddress}</>}{f.lenderId && <>, holding Government ID No. {f.lenderId}</>}, hereinafter referred to as the "<i>Lender</i>",</p>
+      <p>and</p>
+      <p><b>{loan.borrower}</b>, of legal age, Filipino, residing at {f.borrowerAddress || "_____"}, holding Government ID No. {f.borrowerId || "_____"}, hereinafter referred to as the "<i>Borrower</i>".</p>
+
+      <H>LOAN AMOUNT</H>
+      <p>The Lender agrees to lend to the Borrower the amount of:</p>
+      <p className="font-bold">{pesoWords(loan.amount)} ({fmt(loan.amount)})</p>
+      <p>The Borrower acknowledges receipt of the full loan amount upon signing of this Agreement.</p>
+
+      <H>PURPOSE OF LOAN</H>
+      <p>The loan shall be used exclusively for {f.purpose || "_____"}. The Borrower agrees not to use the loan for unlawful or unauthorized purposes.</p>
+
+      <H>INTEREST</H>
+      <p>The loan shall bear interest as reflected in the amortization/payment schedule below, forming an integral part of this Agreement.</p>
+      <p>The total agreed interest is {fmt(sched.totalInterest)}, making the total repayment amount {fmt(totalRepay)}, payable over {loan.terms} {loan.frequency} installments in accordance with the agreed schedule.</p>
+
+      <H>RESPONSIBILITY AND OBLIGATION</H>
+      <p>The Borrower acknowledges their responsibility to:</p>
+      <ul className="list-disc pl-6">
+        <li>Repay the loan according to the agreed terms</li>
+        <li>Pay the interest on the loan</li>
+        <li>Notify the Lender of any changes or difficulties that may affect their ability to repay the loan</li>
+      </ul>
+
+      <H>REPAYMENT TERMS AND SPECIAL CONDITION</H>
+      <p>a. The Borrower shall repay the Loan in {loan.terms} installments in the amounts reflected in the payment schedule below, beginning {firstDue}, and ending {lastDue}.</p>
+      <p>b. Payments shall be made on or before the due dates indicated in the payment schedule.</p>
+      <table className="w-full text-xs border border-slate-400 mt-2">
+        <thead><tr className="bg-slate-100">
+          <th className="border border-slate-400 px-2 py-1 text-left">#</th>
+          <th className="border border-slate-400 px-2 py-1 text-left">Principal</th>
+          <th className="border border-slate-400 px-2 py-1 text-left">Interest</th>
+          <th className="border border-slate-400 px-2 py-1 text-left">Amount Due</th>
+          <th className="border border-slate-400 px-2 py-1 text-left">Due Date</th>
+        </tr></thead>
+        <tbody>
+          {sched.rows.map(r => (
+            <tr key={r.period}>
+              <td className="border border-slate-400 px-2 py-1">{r.period}</td>
+              <td className="border border-slate-400 px-2 py-1">{fmt(r.principal)}</td>
+              <td className="border border-slate-400 px-2 py-1">{fmt(r.interest)}</td>
+              <td className="border border-slate-400 px-2 py-1">{fmt(r.total)}</td>
+              <td className="border border-slate-400 px-2 py-1">{fmtDate(r.due)}</td>
+            </tr>
+          ))}
+          <tr className="font-bold bg-slate-50">
+            <td className="border border-slate-400 px-2 py-1">TOTAL</td>
+            <td className="border border-slate-400 px-2 py-1">{fmt(loan.amount)}</td>
+            <td className="border border-slate-400 px-2 py-1">{fmt(sched.totalInterest)}</td>
+            <td className="border border-slate-400 px-2 py-1">{fmt(totalRepay)}</td>
+            <td className="border border-slate-400 px-2 py-1"></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <H>PREPAYMENT</H>
+      <p>The Borrower may prepay the loan in whole or in part at any time without penalty. Any prepayment shall first be applied to accrued interest before principal.</p>
+
+      <H>DEFAULT</H>
+      <p>The Borrower shall be considered in default upon: (a) failure to pay any installment on its due date; (b) violation of any term of this Agreement; or (c) providing false or misleading information.</p>
+      <p>Upon default, the entire outstanding balance, including accrued interest and penalties, shall become immediately due and demandable without need of further notice. The Lender may pursue legal remedies to recover the debt, including filing a collection case. All legal costs, attorney's fees, and collection expenses shall be borne by the Borrower.</p>
+
+      <H>GOVERNING LAW</H>
+      <p>The laws of the Republic of the Philippines will govern this Agreement, and its provisions will be enforced in accordance with the country's laws, including those related to small claims procedures.</p>
+
+      {f.hasGuarantor && (
+        <>
+          <H>GUARANTOR (JOINT AND SOLIDARY LIABILITY)</H>
+          <p>For value received, the undersigned Guarantor hereby binds himself/herself jointly and severally with the Borrower for the full and prompt payment of all obligations under this Agreement. The liability is direct and immediate; the Lender is not required to exhaust remedies against the Borrower before proceeding against the Guarantor; and this guarantee remains valid until full payment of the loan.</p>
+          <p><b>Guarantor: {f.guarantorName || "_____"} — {f.guarantorAddress || "_____"} — Gov't ID No. {f.guarantorId || "_____"}</b></p>
+        </>
+      )}
+
+      <H>ACKNOWLEDGMENT</H>
+      <p>By signing below, the Parties acknowledge that they have read, understood, and voluntarily agreed to all terms and conditions of this Agreement.</p>
+
+      <div className="grid grid-cols-2 gap-6 pt-8">
+        <Sig src={f.sigLender} name={f.lenderName} role="Lender" />
+        <Sig src={f.sigBorrower} name={loan.borrower} role="Borrower" signedAt={eSigned.borrower} />
+      </div>
+      {f.hasGuarantor && (
+        <div className="grid grid-cols-2 gap-6 pt-6">
+          <Sig src={f.sigGuarantor} name={f.guarantorName} role="Guarantor" signedAt={eSigned.guarantor} />
+          <div></div>
+        </div>
+      )}
+
+      {f.hasWitnesses && (f.witness1 || f.witness2) && (
+        <>
+          <p className="pt-6">Signed in the presence of:</p>
+          <div className="grid grid-cols-2 gap-6 pt-2">
+            {f.witness1 && <Sig src={f.sigWitness1} name={f.witness1} role="Witness 1" />}
+            {f.witness2 && <Sig src={f.sigWitness2} name={f.witness2} role="Witness 2" />}
+          </div>
+        </>
+      )}
+      <p className="pt-6 font-bold">
+        All known to me and to me known to be the same persons who executed the foregoing Loan Agreement consisting of 3 pages, including this page, and they acknowledged to me that the same is their free and voluntary act and deed.
+      </p>
+      <p className="pt-6 font-bold">
+        This instrument refers to a Loan Agreement covering the principal amount of {pesoWords(loan.amount)} ({fmt(loan.amount)}).
+      </p>
+      <p className="pt-6 font-bold">
+        WITNESS MY HAND AND SEAL on the date and place first above written.
+      </p>
+      <p className="font-bold">Notary Public</p>
+      <p className="font-bold">Doc. No. ___</p>
+      <p className="font-bold">Page No. ___</p>
+      <p className="font-bold">Book No. ___</p>
+      <p className="font-bold">Series of 2026</p>
+    </div>
+  );
+}
+
+// Renders #agreement-print to a multi-page A4 PDF. Shared by both screens.
+async function exportAgreementPdf(filename) {
+  const el = document.getElementById("agreement-print");
+  if (!el) return;
+  if (!window.html2canvas || !window.jspdf) { alert("PDF tools are still loading — connect to the internet once so they cache, then try again."); return; }
+  try {
+    const canvas = await window.html2canvas(el, { scale: 2, backgroundColor: "#ffffff", useCORS: true });
+    const imgData = canvas.toDataURL("image/png");
+    const pdf = new window.jspdf.jsPDF("p", "mm", "a4");
+    const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW, imgH = canvas.height * imgW / canvas.width;
+    let heightLeft = imgH, position = 0;
+    pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while (heightLeft > 0) {
+      position -= pageH;
+      pdf.addPage();
+      pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    pdf.save(filename);
+  } catch (err) {
+    console.error(err);
+    alert("Could not generate the PDF. Try the Print button instead.");
+  }
+}
+
+// ─── Loan Agreement (fill-in form + signatures + printable document) ──────────
+function AgreementView({ loan, fmt, onBack, onSave, flash }) {
+  const [f, setF] = useState(() => {
+    const saved = loan.agreement || {};
+    return {
+      lenderName: "Liezel Anne Davalos",
+      lenderAddress: "",
+      lenderId: "",
+      borrowerAddress: "", borrowerId: "", borrowerEmail: "", purpose: "",
+      // Guarantor and witnesses are optional. Agreements saved before these flags existed keep any that were filled in.
+      hasGuarantor: !!(saved.guarantorName || saved.guarantorAddress || saved.guarantorId || saved.sigGuarantor),
+      hasWitnesses: !!(saved.witness1 || saved.witness2 || saved.sigWitness1 || saved.sigWitness2),
+      guarantorName: "", guarantorAddress: "", guarantorId: "", guarantorEmail: "",
+      witness1: "", witness2: "", agreementDate: today(),
+      sigLender: "", sigBorrower: "", sigGuarantor: "", sigWitness1: "", sigWitness2: "",
+      ...saved
+    };
+  });
+  const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+  const [busy, setBusy] = useState(false);
+
+  const exportPdf = async () => {
+    setBusy(true);
+    try { await exportAgreementPdf(`Loan Agreement - ${loan.borrower} (${loan.ref || loan.id}).pdf`); }
+    finally { setBusy(false); }
+  };
+
+  // ── Remote signing ──
+  // Requests live in their own table: a remote signature is never written into
+  // `f`, so saving this form can't overwrite one with a stale empty value.
+  const [requests, setRequests] = useState([]);
+  const [sending, setSending] = useState(null);     // role being prepared
+  const [shareSheet, setShareSheet] = useState(null);
+  const [docHash, setDocHash] = useState(null);
+  const loadRequests = useCallback(async () => {
+    try { setRequests(await api.listSigning(loan.id)); } catch (e) { console.error(e); }
+  }, [loan.id]);
+  useEffect(() => {
+    loadRequests();
+    // Coming back to the app (e.g. after the borrower signs) shows the new status.
+    const onVis = () => { if (document.visibilityState === "visible") loadRequests(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [loadRequests]);
+  useEffect(() => {
+    let live = true;
+    agreementDocHash(loan, f).then(h => { if (live) setDocHash(h); });
+    return () => { live = false; };
+  }, [loan, f]);
+
+  const nowMs = Date.now();
+  const byRole = role => requests.filter(r => r.role === role);
+  const signedReq = role => byRole(role).filter(r => r.status === "signed")
+    .sort((a, b) => a.signed_at < b.signed_at ? -1 : 1).pop() || null;
+  const pendingReq = role => byRole(role).filter(r => r.status === "sent" && new Date(r.expires_at).getTime() > nowMs).pop() || null;
+  const expiredReq = role => {
+    const last = byRole(role).filter(r => r.status !== "cancelled").pop();
+    return last && last.status === "sent" && new Date(last.expires_at).getTime() <= nowMs ? last : null;
+  };
+  // The latest remote signature that was removed, while nothing newer replaced it.
+  const revokedReq = role => {
+    const last = byRole(role).filter(r => r.status !== "cancelled").pop();
+    return last && last.status === "revoked" ? last : null;
+  };
+  const remoteSigned = { borrower: signedReq("borrower"), guarantor: f.hasGuarantor ? signedReq("guarantor") : null };
+  // What gets printed: a remote signature wins over anything drawn on this device.
+  const docF = {
+    ...f,
+    ...(remoteSigned.borrower ? { sigBorrower: remoteSigned.borrower.signature } : {}),
+    ...(remoteSigned.guarantor ? { sigGuarantor: remoteSigned.guarantor.signature } : {}),
+  };
+  const eSigned = {
+    borrower: remoteSigned.borrower && remoteSigned.borrower.signed_at,
+    guarantor: remoteSigned.guarantor && remoteSigned.guarantor.signed_at,
+  };
+
+  const sendToSign = async role => {
+    const { label, emailKey } = REMOTE_ROLES[role];
+    const who = label.toLowerCase();
+    const email = String(f[emailKey] || "").trim();
+    const name = role === "guarantor" ? String(f.guarantorName || "").trim() : loan.borrower;
+    if (!name) { flash(`Add the ${who}'s name first.`); return; }
+    if (!isEmail(email)) { flash(`Add the ${who}'s email in Agreement Details first.`); return; }
+    if (!navigator.onLine) { flash("Sending needs an internet connection."); return; }
+    setSending(role);
+    try {
+      await onSave(f);
+      const token = newSignToken();
+      const expires = new Date(Date.now() + SIGN_LINK_DAYS * 86400000);
+      // The signer sees the agreement exactly as it is now, minus contact emails.
+      const { borrowerEmail, guarantorEmail, ...agreement } = docF;
+      await api.cancelSigning(byRole(role).filter(r => r.status === "sent").map(r => r.id));
+      await api.createSigning({
+        loan_id: loan.id, role, signer_name: name, signer_email: email,
+        token_hash: await sha256Hex(token),
+        snapshot: { loan: Object.fromEntries(SIGNED_LOAN_FIELDS.map(k => [k, loan[k] ?? null])), agreement },
+        doc_hash: await agreementDocHash(loan, f),
+        expires_at: expires.toISOString(),
+      });
+      await loadRequests();
+
+      const link = `${location.origin}${location.pathname}?sign=${token}`;
+      const lender = f.lenderName || "your lender";
+      const first = name.split(/\s+/)[0];
+      const subject = `Loan Agreement ${loan.ref || ""} - please review and sign`;
+      const intro = role === "guarantor"
+        ? `${loan.borrower} named you as guarantor on their loan agreement (${loan.ref}, ${fmt(loan.amount)}) with ${lender}. Please open this private link to read it and sign as guarantor:`
+        : `Please review and sign your loan agreement (${loan.ref}, ${fmt(loan.amount)}) with ${lender}. Open this private link to read and sign it on your phone:`;
+      const body = [`Hi ${first},`, "", intro, link, "",
+        `The link is for you only and expires on ${fmtDate(expires)}.`, "", "Thank you,", lender].join("\n");
+      setShareSheet({ role, name, email, link, subject, body,
+        mailto: `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}` });
+    } catch (e) {
+      console.error(e);
+      flash("Could not create the signing link — check your connection.");
+    } finally {
+      setSending(null);
+    }
+  };
+  const cancelSign = async req => {
+    try { await api.cancelSigning([req.id]); await loadRequests(); flash("Link cancelled — it no longer opens."); }
+    catch (e) { console.error(e); flash("Could not cancel — check your connection."); }
+  };
+  const removeSign = async req => {
+    const who = req.typed_name || req.signer_name;
+    if (!confirm(`Remove ${who}'s electronic signature from this agreement?\n\nIt stops appearing on the agreement and its link can't be signed again. To get a new signature, draw one or send a new link.`)) return;
+    try { await api.revokeSigning(req.id); await loadRequests(); flash("Signature removed."); }
+    catch (e) { console.error(e); flash("Could not remove the signature — check your connection."); }
+  };
+  const copyLink = async link => {
+    try { await navigator.clipboard.writeText(link); flash("Link copied."); }
+    catch { flash("Couldn't copy — press and hold the link to copy it."); }
+  };
+  const shareLink = async s => {
+    try { await navigator.share({ title: s.subject, text: s.body }); }
+    catch (e) { if (e && e.name !== "AbortError") flash("Sharing isn't available here — use Copy link."); }
+  };
+
   const partyFields = [
     ["Lender Name", "lenderName"], ["Lender Address", "lenderAddress"], ["Lender Gov't ID No.", "lenderId"],
     ["Borrower Address", "borrowerAddress"], ["Borrower Gov't ID No.", "borrowerId"],
+    ["Borrower Email (to send the agreement for signing)", "borrowerEmail", "email"],
     ["Purpose of Loan", "purpose"]
   ];
-  const guarantorFields = [["Guarantor Name", "guarantorName"], ["Guarantor Address", "guarantorAddress"], ["Guarantor Gov't ID No.", "guarantorId"]];
+  const guarantorFields = [["Guarantor Name", "guarantorName"], ["Guarantor Address", "guarantorAddress"], ["Guarantor Gov't ID No.", "guarantorId"],
+    ["Guarantor Email", "guarantorEmail", "email"]];
   const witnessFields = [["Witness 1 Name", "witness1"], ["Witness 2 Name", "witness2"]];
   // Called as a function, not rendered as <Field/>: a component defined here would remount on every keystroke and drop focus.
-  const field = ([lbl, key]) => (
+  const field = ([lbl, key, type]) => (
     <div key={key}>
       <label className={labelCls}>{lbl}</label>
-      <input className={inputCls} value={f[key]} onChange={e => set(key, e.target.value)} />
+      <input className={inputCls} value={f[key] || ""} onChange={e => set(key, e.target.value)}
+        {...(type === "email" ? { type: "email", inputMode: "email", autoCapitalize: "off", autoCorrect: "off", spellCheck: false } : {})} />
     </div>
   );
   // On/off switch for an optional party; called as a function, like `field`.
@@ -1247,14 +1550,62 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
     </button>
   );
 
-  const Sig = ({ src, name, role }) => (
-    <div className="text-center">
-      <div className="h-16 flex items-end justify-center">{src ? <img src={src} alt="" className="max-h-16" /> : null}</div>
-      <div className="border-t border-slate-800 pt-1 font-bold">{name || " "}</div>
-      <div className="text-xs italic text-slate-600">{role}</div>
-    </div>
-  );
-  const H = ({ children }) => <h2 className="font-bold pt-3">{children}</h2>;
+  // Borrower / Guarantor signature: drawn here, or sent by email to sign
+  // remotely. Called as a function, like `field`.
+  const day = iso => fmtDate(new Date(iso));
+  const when = iso => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const remoteSignature = role => {
+    const { label, sigKey, emailKey } = REMOTE_ROLES[role];
+    const signed = signedReq(role), pending = pendingReq(role), expired = expiredReq(role), revoked = revokedReq(role);
+    const changed = r => r && docHash && r.doc_hash !== docHash;
+    const canSend = !signed || changed(signed);
+    return (
+      <div key={role} className="space-y-2">
+        {signed ? (
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className={labelCls}>{label} Signature</label>
+              <button type="button" onClick={() => removeSign(signed)} className="text-xs text-red-400 font-semibold">Remove</button>
+            </div>
+            <div className="sig-paper h-20 rounded-xl border border-emerald-200 bg-white flex items-center justify-center overflow-hidden">
+              <img src={signed.signature} alt="" className="max-h-20" />
+            </div>
+            <p className="mt-1 text-[11px] text-emerald-700 leading-snug">✓ Signed electronically by {signed.typed_name} · {when(signed.signed_at)} · link sent to {signed.signer_email}</p>
+          </div>
+        ) : (
+          <SignatureField label={`${label} Signature`} value={f[sigKey]} onChange={v => set(sigKey, v)} />
+        )}
+        <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2.5 space-y-2">
+          {pending && (
+            <p className="text-[11px] text-slate-500 leading-snug">
+              Sent to <span className="font-semibold text-slate-600">{pending.signer_email}</span> · {day(pending.created_at)} · {pending.opened_at ? `opened ${day(pending.opened_at)}` : "not opened yet"} · expires {day(pending.expires_at)}
+            </p>
+          )}
+          {!pending && expired && <p className="text-[11px] text-slate-500">Link sent {day(expired.created_at)} expired on {day(expired.expires_at)}.</p>}
+          {!pending && revoked && (
+            <p className="text-[11px] text-slate-500 leading-snug">
+              Removed the signature by {revoked.typed_name || revoked.signer_name} (signed {day(revoked.signed_at)}){revoked.revoked_at ? ` on ${day(revoked.revoked_at)}` : ""}.
+            </p>
+          )}
+          {pending && changed(pending) && <p className="text-[11px] text-amber-700">Details changed since this was sent — send again so they sign the latest version.</p>}
+          {signed && changed(signed) && <p className="text-[11px] text-amber-700">Details changed after they signed — send again for a signature on the latest version.</p>}
+          {canSend && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => sendToSign(role)} disabled={!!sending}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold disabled:opacity-50">
+                {sending === role ? "Preparing…" : pending || expired || signed || revoked ? "✉ Send again" : "✉ Send to sign by email"}
+              </button>
+              {pending && (
+                <button type="button" onClick={() => cancelSign(pending)}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 text-xs font-semibold">Cancel link</button>
+              )}
+            </div>
+          )}
+          {canSend && !isEmail(f[emailKey]) && <p className="text-[11px] text-slate-400">Add the {label.toLowerCase()}'s email in Agreement Details to send it.</p>}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -1282,10 +1633,10 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
 
       <div className="no-print bg-white rounded-2xl border border-slate-100 p-4 space-y-3 shadow-sm">
         <p className="font-semibold text-slate-800">Signatures</p>
-        <p className="text-xs text-slate-400 -mt-2">Tap Draw to sign in a popup, or Upload an image — saved with the agreement.</p>
+        <p className="text-xs text-slate-400 -mt-2">Tap Draw to sign in a popup, or Upload an image — saved with the agreement. The borrower and guarantor can also sign on their own phone from an emailed link.</p>
         <SignatureField label="Lender Signature" value={f.sigLender} onChange={v => set("sigLender", v)} />
-        <SignatureField label="Borrower Signature" value={f.sigBorrower} onChange={v => set("sigBorrower", v)} />
-        {f.hasGuarantor && <SignatureField label="Guarantor Signature" value={f.sigGuarantor} onChange={v => set("sigGuarantor", v)} />}
+        {remoteSignature("borrower")}
+        {f.hasGuarantor && remoteSignature("guarantor")}
         {f.hasWitnesses && (
           <>
             <SignatureField label="Witness 1 Signature" value={f.sigWitness1} onChange={v => set("sigWitness1", v)} />
@@ -1294,129 +1645,166 @@ function AgreementView({ loan, fmt, onBack, onSave }) {
         )}
       </div>
 
-      <div id="agreement-print" className="bg-white rounded-2xl border border-slate-100 p-6 shadow-sm text-slate-800 text-sm leading-relaxed space-y-2"
-        style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
-        <h1 className="text-center font-bold text-lg">LOAN AGREEMENT</h1>
-        <div className="h-4"></div>
-        <p>This Loan Agreement is made and entered into this {fmtDate(aDate)}, by and between:</p>
-        <p><b>{f.lenderName || "_____"}</b>, of legal age, Filipino{f.lenderAddress && <>, residing at {f.lenderAddress}</>}{f.lenderId && <>, holding Government ID No. {f.lenderId}</>}, hereinafter referred to as the "<i>Lender</i>",</p>
-        <p>and</p>
-        <p><b>{loan.borrower}</b>, of legal age, Filipino, residing at {f.borrowerAddress || "_____"}, holding Government ID No. {f.borrowerId || "_____"}, hereinafter referred to as the "<i>Borrower</i>".</p>
+      <AgreementDocument loan={loan} f={docF} fmt={fmt} eSigned={eSigned} />
 
-        <H>LOAN AMOUNT</H>
-        <p>The Lender agrees to lend to the Borrower the amount of:</p>
-        <p className="font-bold">{pesoWords(loan.amount)} ({fmt(loan.amount)})</p>
-        <p>The Borrower acknowledges receipt of the full loan amount upon signing of this Agreement.</p>
-
-        <H>PURPOSE OF LOAN</H>
-        <p>The loan shall be used exclusively for {f.purpose || "_____"}. The Borrower agrees not to use the loan for unlawful or unauthorized purposes.</p>
-
-        <H>INTEREST</H>
-        <p>The loan shall bear interest as reflected in the amortization/payment schedule below, forming an integral part of this Agreement.</p>
-        <p>The total agreed interest is {fmt(sched.totalInterest)}, making the total repayment amount {fmt(totalRepay)}, payable over {loan.terms} {loan.frequency} installments in accordance with the agreed schedule.</p>
-
-        <H>RESPONSIBILITY AND OBLIGATION</H>
-        <p>The Borrower acknowledges their responsibility to:</p>
-        <ul className="list-disc pl-6">
-          <li>Repay the loan according to the agreed terms</li>
-          <li>Pay the interest on the loan</li>
-          <li>Notify the Lender of any changes or difficulties that may affect their ability to repay the loan</li>
-        </ul>
-
-        <H>REPAYMENT TERMS AND SPECIAL CONDITION</H>
-        <p>a. The Borrower shall repay the Loan in {loan.terms} installments in the amounts reflected in the payment schedule below, beginning {firstDue}, and ending {lastDue}.</p>
-        <p>b. Payments shall be made on or before the due dates indicated in the payment schedule.</p>
-        <table className="w-full text-xs border border-slate-400 mt-2">
-          <thead><tr className="bg-slate-100">
-            <th className="border border-slate-400 px-2 py-1 text-left">#</th>
-            <th className="border border-slate-400 px-2 py-1 text-left">Principal</th>
-            <th className="border border-slate-400 px-2 py-1 text-left">Interest</th>
-            <th className="border border-slate-400 px-2 py-1 text-left">Amount Due</th>
-            <th className="border border-slate-400 px-2 py-1 text-left">Due Date</th>
-          </tr></thead>
-          <tbody>
-            {sched.rows.map(r => (
-              <tr key={r.period}>
-                <td className="border border-slate-400 px-2 py-1">{r.period}</td>
-                <td className="border border-slate-400 px-2 py-1">{fmt(r.principal)}</td>
-                <td className="border border-slate-400 px-2 py-1">{fmt(r.interest)}</td>
-                <td className="border border-slate-400 px-2 py-1">{fmt(r.total)}</td>
-                <td className="border border-slate-400 px-2 py-1">{fmtDate(r.due)}</td>
-              </tr>
-            ))}
-            <tr className="font-bold bg-slate-50">
-              <td className="border border-slate-400 px-2 py-1">TOTAL</td>
-              <td className="border border-slate-400 px-2 py-1">{fmt(loan.amount)}</td>
-              <td className="border border-slate-400 px-2 py-1">{fmt(sched.totalInterest)}</td>
-              <td className="border border-slate-400 px-2 py-1">{fmt(totalRepay)}</td>
-              <td className="border border-slate-400 px-2 py-1"></td>
-            </tr>
-          </tbody>
-        </table>
-
-        <H>PREPAYMENT</H>
-        <p>The Borrower may prepay the loan in whole or in part at any time without penalty. Any prepayment shall first be applied to accrued interest before principal.</p>
-
-        <H>DEFAULT</H>
-        <p>The Borrower shall be considered in default upon: (a) failure to pay any installment on its due date; (b) violation of any term of this Agreement; or (c) providing false or misleading information.</p>
-        <p>Upon default, the entire outstanding balance, including accrued interest and penalties, shall become immediately due and demandable without need of further notice. The Lender may pursue legal remedies to recover the debt, including filing a collection case. All legal costs, attorney's fees, and collection expenses shall be borne by the Borrower.</p>
-
-        <H>GOVERNING LAW</H>
-        <p>The laws of the Republic of the Philippines will govern this Agreement, and its provisions will be enforced in accordance with the country's laws, including those related to small claims procedures.</p>
-
-        {f.hasGuarantor && (
-          <>
-            <H>GUARANTOR (JOINT AND SOLIDARY LIABILITY)</H>
-            <p>For value received, the undersigned Guarantor hereby binds himself/herself jointly and severally with the Borrower for the full and prompt payment of all obligations under this Agreement. The liability is direct and immediate; the Lender is not required to exhaust remedies against the Borrower before proceeding against the Guarantor; and this guarantee remains valid until full payment of the loan.</p>
-            <p><b>Guarantor: {f.guarantorName || "_____"} — {f.guarantorAddress || "_____"} — Gov't ID No. {f.guarantorId || "_____"}</b></p>
-          </>
-        )}
-
-        <H>ACKNOWLEDGMENT</H>
-        <p>By signing below, the Parties acknowledge that they have read, understood, and voluntarily agreed to all terms and conditions of this Agreement.</p>
-
-        <div className="grid grid-cols-2 gap-6 pt-8">
-          <Sig src={f.sigLender} name={f.lenderName} role="Lender" />
-          <Sig src={f.sigBorrower} name={loan.borrower} role="Borrower" />
-        </div>
-        {f.hasGuarantor && (
-          <div className="grid grid-cols-2 gap-6 pt-6">
-            <Sig src={f.sigGuarantor} name={f.guarantorName} role="Guarantor" />
-            <div></div>
-          </div>
-        )}
-
-       
-        {f.hasWitnesses && (f.witness1 || f.witness2) && (
-          <>
-            <p className="pt-6">Signed in the presence of:</p>
-            <div className="grid grid-cols-2 gap-6 pt-2">
-              {f.witness1 && <Sig src={f.sigWitness1} name={f.witness1} role="Witness 1" />}
-              {f.witness2 && <Sig src={f.sigWitness2} name={f.witness2} role="Witness 2" />}
+      {shareSheet && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center p-4 animate-fade-in"
+          onClick={() => setShareSheet(null)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-4 space-y-3 animate-scale-in" onClick={e => e.stopPropagation()}
+            role="dialog" aria-label="Send the agreement">
+            <div>
+              <p className="font-semibold text-slate-800">Signing link ready</p>
+              <p className="text-xs text-slate-500 mt-0.5">For {shareSheet.name} ({REMOTE_ROLES[shareSheet.role].label.toLowerCase()}) · {shareSheet.email}</p>
             </div>
-          </>
-        )}
-        
-        <p className="pt-6 font-bold">
-          All known to me and to me known to be the same persons who executed the foregoing Loan Agreement consisting of 3 pages, including this page, and they acknowledged to me that the same is their free and voluntary act and deed.
-        </p>
-        <p className="pt-6 font-bold">
-          This instrument refers to a Loan Agreement covering the principal amount of {pesoWords(loan.amount)} ({fmt(loan.amount)}).
-        </p>
-        <p className="pt-6 font-bold">
-          WITNESS MY HAND AND SEAL on the date and place first above written.
-        </p>
-        <p className="font-bold">Notary Public</p>
-        <p className="font-bold">Doc. No. ___</p>
-        <p className="font-bold">Page No. ___</p>
-        <p className="font-bold">Book No. ___</p>
-        <p className="font-bold">Series of 2026</p>
-      </div>
+            <a href={shareSheet.mailto}
+              className="w-full py-3 rounded-xl bg-emerald-600 text-white text-sm font-semibold flex items-center justify-center gap-2">✉ Open email app</a>
+            {typeof navigator.share === "function" && (
+              <button type="button" onClick={() => shareLink(shareSheet)}
+                className="w-full py-3 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold">Share link (Messenger, Viber, SMS…)</button>
+            )}
+            <button type="button" onClick={() => copyLink(shareSheet.link)}
+              className="w-full py-3 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold">Copy link</button>
+            <p className="text-[11px] text-slate-400 leading-relaxed break-all">{shareSheet.link}</p>
+            <p className="text-[11px] text-slate-400 leading-relaxed">Only send this to {shareSheet.name.split(/\s+/)[0]} — anyone with the link can read the agreement until it expires. You'll see “Signed” here once they sign.</p>
+            <button type="button" onClick={() => setShareSheet(null)} className="w-full py-2.5 rounded-xl text-slate-500 text-sm font-semibold">Done</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
+// ─── Signer page (opened from the emailed link: ?sign=<token>) ────────────────
+// No login and no app data: the agreement exactly as it was sent, a signature
+// pad, and a submit. The agreement-sign function re-checks everything.
+const fmtPeso = v => "₱" + Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+function SignPage({ token }) {
+  const [st, setSt] = useState({ phase: "loading" });   // loading | ready | signed | error
+  const [sig, setSig] = useState("");
+  const [padOpen, setPadOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [agree, setAgree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const call = async body => {
+    if (!sb) throw new Error("Supabase library not loaded.");
+    const { data, error } = await sb.functions.invoke("agreement-sign", { body: { token, ...body } });
+    if (error) {
+      try { const j = await error.context.json(); if (j && j.message) return j; } catch {}
+      throw error;
+    }
+    return data;
+  };
+  const load = async () => {
+    try {
+      const d = await call({ action: "get" });
+      setSt(d.ok ? { ...d, phase: d.status === "signed" ? "signed" : "ready" } : { phase: "error", message: d.message });
+    } catch (e) {
+      console.error(e);
+      setSt({ phase: "error", message: "Couldn't load the agreement. Check your internet connection, then open the link again." });
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  const submit = async () => {
+    setErr("");
+    if (!sig) { setErr("Please draw your signature."); return; }
+    if (typed.trim().length < 2) { setErr("Please type your full name."); return; }
+    if (!agree) { setErr("Please tick the box to confirm you agree."); return; }
+    setBusy(true);
+    try {
+      const d = await call({ action: "sign", signature: sig, typedName: typed, consent: true });
+      if (!d.ok) { setErr(d.message); if (d.code === "signed") load(); return; }
+      setSt(s => ({ ...s, phase: "signed", status: "signed", justSigned: true, signedAt: d.signedAt, signature: sig, typedName: typed.trim() }));
+      window.scrollTo(0, 0);
+    } catch (e) {
+      console.error(e);
+      setErr("Couldn't send your signature. Check your connection and tap Sign again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const shell = children => (
+    <div className="min-h-screen bg-slate-50">
+      <div className="max-w-2xl mx-auto px-4 py-5 space-y-4">{children}</div>
+    </div>
+  );
+  const card = "no-print bg-white rounded-2xl border border-slate-100 p-4 shadow-sm";
+
+  if (st.phase === "loading") return shell(<div className={`${card} text-sm text-slate-500`}>Loading the agreement…</div>);
+  if (st.phase === "error") return shell(
+    <div className={`${card} space-y-1`}>
+      <p className="font-semibold text-slate-800">Loan agreement</p>
+      <p className="text-sm text-slate-600">{st.message}</p>
+    </div>
+  );
+
+  const { loan, agreement } = st.snapshot;
+  const { label, sigKey } = REMOTE_ROLES[st.role];
+  const lender = agreement.lenderName || "The lender";
+  const first = String(st.signerName || "").split(/\s+/)[0];
+  const signed = st.phase === "signed";
+  const docF = { ...agreement, [sigKey]: signed ? st.signature : sig };
+  const savePdf = async () => {
+    setPdfBusy(true);
+    try { await exportAgreementPdf(`Loan Agreement - ${loan.borrower} (${loan.ref}).pdf`); }
+    finally { setPdfBusy(false); }
+  };
+
+  return shell(<>
+    <div className={card}>
+      <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Loan agreement · {loan.ref}</p>
+      <p className="mt-1 font-semibold text-slate-800">{st.signerName} <span className="font-normal text-slate-500">· {label}</span></p>
+      {signed ? (
+        <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-100 px-3 py-2.5">
+          <p className="text-sm font-semibold text-emerald-700">✓ {st.justSigned ? `Signed — thank you, ${first}.` : "You have signed this agreement."}</p>
+          <p className="text-xs text-emerald-700 mt-0.5">Signed electronically on {fmtDate(new Date(st.signedAt))}{st.justSigned ? `. ${lender} has been notified.` : "."} You can save a copy below.</p>
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-slate-600">{lender} sent you this loan agreement to sign as {label.toLowerCase()}. Please read it, then sign at the bottom. This link expires on {fmtDate(new Date(st.expiresAt))}.</p>
+      )}
+      {signed && (
+        <button type="button" onClick={savePdf} disabled={pdfBusy}
+          className="mt-3 w-full py-2.5 rounded-xl bg-slate-800 text-white text-sm font-semibold disabled:opacity-50">{pdfBusy ? "Preparing…" : "Download a copy (PDF)"}</button>
+      )}
     </div>
 
-  );
+    <AgreementDocument loan={loan} f={docF} fmt={fmtPeso} eSigned={signed ? { [st.role]: st.signedAt } : {}} />
+
+    {!signed && (
+      <div className={`${card} space-y-3`}>
+        <p className="font-semibold text-slate-800">Sign as {label.toLowerCase()}</p>
+        <div>
+          <label className={labelCls}>Your signature</label>
+          <div className="flex items-stretch gap-3">
+            <div className="sig-paper flex-1 h-20 rounded-xl border border-slate-200 bg-white flex items-center justify-center overflow-hidden">
+              {sig ? <img src={sig} alt="Your signature" className="max-h-20" /> : <span className="text-xs text-slate-300">Not signed yet</span>}
+            </div>
+            <button type="button" onClick={() => setPadOpen(true)}
+              className="px-4 rounded-xl bg-slate-800 text-white text-sm font-semibold">✍ {sig ? "Redo" : "Draw"}</button>
+          </div>
+        </div>
+        <div>
+          <label className={labelCls} htmlFor="sign-name">Type your full name</label>
+          <input id="sign-name" className={inputCls} value={typed} onChange={e => { setTyped(e.target.value); setErr(""); }}
+            placeholder={st.signerName} autoComplete="name" />
+        </div>
+        <label className="flex items-start gap-2.5 text-sm text-slate-600 leading-snug">
+          <input type="checkbox" className="mt-0.5 w-5 h-5 shrink-0 accent-emerald-600" checked={agree} onChange={e => { setAgree(e.target.checked); setErr(""); }} />
+          <span>I have read this Loan Agreement and agree to its terms. I am signing it electronically, and my electronic signature has the same effect as my handwritten signature.</span>
+        </label>
+        {err && <p className="text-sm text-red-600">{err}</p>}
+        <button type="button" onClick={submit} disabled={busy}
+          className="w-full py-3 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-50">{busy ? "Signing…" : "Sign agreement"}</button>
+      </div>
+    )}
+    {padOpen && <SignatureModal label="Draw your signature" initial={sig}
+      onCancel={() => setPadOpen(false)} onSave={d => { setSig(d); setPadOpen(false); setErr(""); }} />}
+  </>);
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -4294,7 +4682,7 @@ function App() {
 
         {/* ── LOAN AGREEMENT ── */}
         {tab === "agreement" && (agreementLoan
-          ? <AgreementView loan={agreementLoan} fmt={fmt} onBack={() => setTab("records")} onSave={saveAgreement} />
+          ? <AgreementView loan={agreementLoan} fmt={fmt} onBack={() => setTab("records")} onSave={saveAgreement} flash={flash} />
           : <div className="bg-white rounded-2xl border border-slate-100 p-8 text-center text-slate-400 text-sm">Loan not found. <button onClick={() => setTab("records")} className="text-emerald-600 font-semibold underline">Back to records</button></div>)}
         </div>
       </main>
@@ -5103,5 +5491,7 @@ function App() {
 
 // Init Lucide icons after render
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(React.createElement(App));
+// An emailed signing link (?sign=<token>) opens only the signer page — no login.
+const signToken = (() => { try { return new URLSearchParams(location.search).get("sign"); } catch { return null; } })();
+root.render(signToken ? React.createElement(SignPage, { token: signToken }) : React.createElement(App));
 setTimeout(paintIcons, 300);
