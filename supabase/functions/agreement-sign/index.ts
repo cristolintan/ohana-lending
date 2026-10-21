@@ -8,9 +8,13 @@
 // clients, and every check below runs here with the service role. The app can
 // create and cancel requests, but only this function can mark one signed.
 //
-// Expected outcomes (invalid / expired / cancelled / removed / already signed)
-// come back as 200 { ok: false, code, message } so the page can show them as-is.
-import { createClient } from "npm:@supabase/supabase-js@2";
+// A signature is also written into the loan agreement itself (agreements.data),
+// exactly where one drawn in the app goes, so the lender sees, prints and can
+// remove it like any other. The request row stays as the record.
+//
+// Expected outcomes (invalid / expired / cancelled / already signed) come back
+// as 200 { ok: false, code, message } so the page can show them as-is.
+import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import { sendToSubs, type SubRow } from "../_shared/push.ts";
 
@@ -18,6 +22,27 @@ const MAX_SIGNATURE = 400_000; // characters of the PNG data URL
 const PNG_PREFIX = "data:image/png;base64,";
 
 const fail = (code: string, message: string) => json({ ok: false, code, message });
+
+type Json = Record<string, unknown>;
+type SignedRequest = { id: string; user_id: string; loan_id: string; role: string; signer_email: string; snapshot: Json };
+
+async function placeOnAgreement(admin: SupabaseClient, r: SignedRequest, signature: string, typedName: string, now: string) {
+  const sigKey = r.role === "guarantor" ? "sigGuarantor" : "sigBorrower";
+  const { data: ag, error } = await admin.from("agreements").select("id,data").eq("loan_id", r.loan_id).maybeSingle();
+  if (error) throw error;
+  // The app saves the agreement before sending, so a row normally exists.
+  const d = (ag?.data ?? (r.snapshot?.agreement as Json) ?? {}) as Json;
+  const next = {
+    ...d,
+    [sigKey]: signature,
+    eSign: { ...((d.eSign as Json) ?? {}), [r.role]: { requestId: r.id, signedAt: now, typedName, email: r.signer_email } },
+    eSignApplied: [...new Set([...((d.eSignApplied as string[]) ?? []), r.id])],
+  };
+  const { error: wErr } = ag
+    ? await admin.from("agreements").update({ data: next, updated_at: now }).eq("id", ag.id)
+    : await admin.from("agreements").insert({ user_id: r.user_id, loan_id: r.loan_id, data: next, updated_at: now });
+  if (wErr) throw wErr;
+}
 
 async function sha256Hex(text: string) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -38,7 +63,7 @@ Deno.serve(async (req) => {
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const { data: r, error } = await admin
       .from("signing_requests")
-      .select("id,user_id,loan_id,role,signer_name,snapshot,status,expires_at,opened_at,signed_at,signature,typed_name")
+      .select("id,user_id,loan_id,role,signer_name,signer_email,snapshot,status,expires_at,opened_at,signed_at,signature,typed_name")
       .eq("token_hash", await sha256Hex(token))
       .maybeSingle();
     if (error) throw error;
@@ -46,7 +71,6 @@ Deno.serve(async (req) => {
 
     const lender = r.snapshot?.agreement?.lenderName || "the lender";
     if (r.status === "cancelled") return fail("cancelled", `This link was cancelled. Please ask ${lender} for a new one.`);
-    if (r.status === "revoked") return fail("revoked", `Your signature on this agreement was removed by ${lender}. Please ask them for a new link.`);
     const expired = r.status === "sent" && new Date(r.expires_at).getTime() < Date.now();
     if (expired) return fail("expired", `This link has expired. Please ask ${lender} to send a new one.`);
 
@@ -96,6 +120,16 @@ Deno.serve(async (req) => {
         .select("id");
       if (upErr) throw upErr;
       if (!updated?.length) return fail("signed", "This agreement has already been signed.");
+
+      // Put it on the loan agreement. eSign[role] captions it; eSignApplied lists
+      // link signatures already placed, so one the lender removes stays removed.
+      // Best effort: the signature is already recorded, and the app places any
+      // signed link that isn't on the agreement yet when the agreement is opened.
+      try {
+        await placeOnAgreement(admin, r, signature, name, now);
+      } catch (e) {
+        console.error("placing signature on agreement failed", e);
+      }
 
       // Tell the lender — best effort; the signature is already safely stored.
       try {

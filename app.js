@@ -337,7 +337,7 @@ const api = {
   // agreement-sign function can mark one signed (RLS + column grants).
   async listSigning(loanId) {
     const { data, error } = await sb.from("signing_requests")
-      .select("id,role,signer_name,signer_email,status,doc_hash,expires_at,created_at,opened_at,signed_at,signature,typed_name,revoked_at")
+      .select("id,role,signer_name,signer_email,status,doc_hash,expires_at,created_at,opened_at,signed_at,signature,typed_name")
       .eq("loan_id", loanId).order("created_at");
     if (error) throw error;
     return data || [];
@@ -346,12 +346,6 @@ const api = {
   async cancelSigning(ids) {
     if (!ids.length) return;
     const { error } = await sb.from("signing_requests").update({ status: "cancelled" }).in("id", ids);
-    if (error) throw error;
-  },
-  // Takes a remote signature off the agreement. The row (signature, time, IP)
-  // is kept as a record; the server stamps revoked_at.
-  async revokeSigning(id) {
-    const { error } = await sb.from("signing_requests").update({ status: "revoked" }).eq("id", id);
     if (error) throw error;
   },
   async setOpening(v) {
@@ -1206,11 +1200,12 @@ function newSignToken() {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 // Fingerprint of what a signer agrees to: every agreement field except the
-// signatures and contact emails, plus the loan terms the document prints.
-// A request whose fingerprint differs from today's was signed (or sent) on
-// an older version of the agreement.
+// signatures, contact emails and e-sign bookkeeping, plus the loan terms the
+// document prints. A request whose fingerprint differs from today's was
+// signed (or sent) on an older version of the agreement.
 function agreementDocHash(loan, f) {
-  const fields = Object.keys(f).filter(k => !k.startsWith("sig") && !k.endsWith("Email")).sort().map(k => [k, f[k]]);
+  const fields = Object.keys(f).filter(k => !k.startsWith("sig") && !k.endsWith("Email") && !k.startsWith("eSign"))
+    .sort().map(k => [k, f[k]]);
   return sha256Hex(JSON.stringify([fields, SIGNED_LOAN_FIELDS.map(k => [k, loan[k] ?? null])]));
 }
 
@@ -1414,8 +1409,13 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
   };
 
   // ── Remote signing ──
-  // Requests live in their own table: a remote signature is never written into
-  // `f`, so saving this form can't overwrite one with a stale empty value.
+  // A signature made through an emailed link is written into the agreement
+  // itself (sigBorrower / sigGuarantor) by the agreement-sign function, like one
+  // drawn here, so it shows, prints and can be removed the same way. Alongside:
+  //   eSign[role]   — caption data while that signature is on the agreement
+  //   eSignApplied  — ids of link signatures already placed on the agreement;
+  //                   one removed by the lender is never put back
+  // The request rows stay as the record of who signed, when, from where.
   const [requests, setRequests] = useState([]);
   const [sending, setSending] = useState(null);     // role being prepared
   const [shareSheet, setShareSheet] = useState(null);
@@ -1436,30 +1436,43 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
     return () => { live = false; };
   }, [loan, f]);
 
+  // Keep this open form in step with link signatures it hasn't seen yet — signed
+  // while it was open, or before this version wrote them into the agreement —
+  // so a Save can't drop one. Order by signing time: the newest one wins.
+  useEffect(() => {
+    const isNew = applied => r => r.status === "signed" && REMOTE_ROLES[r.role] && !(applied || []).includes(r.id);
+    if (!requests.some(isNew(f.eSignApplied))) return;
+    setF(prev => {
+      const fresh = requests.filter(isNew(prev.eSignApplied)).sort((a, b) => a.signed_at < b.signed_at ? -1 : 1);
+      if (!fresh.length) return prev;
+      const next = { ...prev, eSign: { ...(prev.eSign || {}) }, eSignApplied: [...(prev.eSignApplied || [])] };
+      fresh.forEach(r => {
+        next[REMOTE_ROLES[r.role].sigKey] = r.signature;
+        next.eSign[r.role] = { requestId: r.id, signedAt: r.signed_at, typedName: r.typed_name, email: r.signer_email };
+        next.eSignApplied.push(r.id);
+      });
+      return next;
+    });
+  }, [requests]);
+  // Drawing, uploading or removing replaces the e-signature, so its caption goes too.
+  const setSig = (role, v) => setF(prev => {
+    const eSign = { ...(prev.eSign || {}) };
+    delete eSign[role];
+    return { ...prev, [REMOTE_ROLES[role].sigKey]: v, eSign };
+  });
+
   const nowMs = Date.now();
   const byRole = role => requests.filter(r => r.role === role);
-  const signedReq = role => byRole(role).filter(r => r.status === "signed")
-    .sort((a, b) => a.signed_at < b.signed_at ? -1 : 1).pop() || null;
   const pendingReq = role => byRole(role).filter(r => r.status === "sent" && new Date(r.expires_at).getTime() > nowMs).pop() || null;
   const expiredReq = role => {
     const last = byRole(role).filter(r => r.status !== "cancelled").pop();
     return last && last.status === "sent" && new Date(last.expires_at).getTime() <= nowMs ? last : null;
   };
-  // The latest remote signature that was removed, while nothing newer replaced it.
-  const revokedReq = role => {
-    const last = byRole(role).filter(r => r.status !== "cancelled").pop();
-    return last && last.status === "revoked" ? last : null;
-  };
-  const remoteSigned = { borrower: signedReq("borrower"), guarantor: f.hasGuarantor ? signedReq("guarantor") : null };
-  // What gets printed: a remote signature wins over anything drawn on this device.
-  const docF = {
-    ...f,
-    ...(remoteSigned.borrower ? { sigBorrower: remoteSigned.borrower.signature } : {}),
-    ...(remoteSigned.guarantor ? { sigGuarantor: remoteSigned.guarantor.signature } : {}),
-  };
+  // The link signature currently on the agreement for a role, if any.
+  const eSignOf = role => (f[REMOTE_ROLES[role].sigKey] && f.eSign && f.eSign[role]) || null;
   const eSigned = {
-    borrower: remoteSigned.borrower && remoteSigned.borrower.signed_at,
-    guarantor: remoteSigned.guarantor && remoteSigned.guarantor.signed_at,
+    borrower: eSignOf("borrower") && eSignOf("borrower").signedAt,
+    guarantor: f.hasGuarantor && eSignOf("guarantor") ? eSignOf("guarantor").signedAt : null,
   };
 
   const sendToSign = async role => {
@@ -1475,8 +1488,9 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
       await onSave(f);
       const token = newSignToken();
       const expires = new Date(Date.now() + SIGN_LINK_DAYS * 86400000);
-      // The signer sees the agreement exactly as it is now, minus contact emails.
-      const { borrowerEmail, guarantorEmail, ...agreement } = docF;
+      // The signer sees the agreement exactly as it is now, minus contact emails
+      // and e-sign bookkeeping.
+      const { borrowerEmail, guarantorEmail, eSign, eSignApplied, ...agreement } = f;
       await api.cancelSigning(byRole(role).filter(r => r.status === "sent").map(r => r.id));
       await api.createSigning({
         loan_id: loan.id, role, signer_name: name, signer_email: email,
@@ -1508,12 +1522,6 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
   const cancelSign = async req => {
     try { await api.cancelSigning([req.id]); await loadRequests(); flash("Link cancelled — it no longer opens."); }
     catch (e) { console.error(e); flash("Could not cancel — check your connection."); }
-  };
-  const removeSign = async req => {
-    const who = req.typed_name || req.signer_name;
-    if (!confirm(`Remove ${who}'s electronic signature from this agreement?\n\nIt stops appearing on the agreement and its link can't be signed again. To get a new signature, draw one or send a new link.`)) return;
-    try { await api.revokeSigning(req.id); await loadRequests(); flash("Signature removed."); }
-    catch (e) { console.error(e); flash("Could not remove the signature — check your connection."); }
   };
   const copyLink = async link => {
     try { await navigator.clipboard.writeText(link); flash("Link copied."); }
@@ -1556,25 +1564,21 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
   const when = iso => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const remoteSignature = role => {
     const { label, sigKey, emailKey } = REMOTE_ROLES[role];
-    const signed = signedReq(role), pending = pendingReq(role), expired = expiredReq(role), revoked = revokedReq(role);
+    const pending = pendingReq(role), expired = expiredReq(role), eSig = eSignOf(role);
     const changed = r => r && docHash && r.doc_hash !== docHash;
-    const canSend = !signed || changed(signed);
+    const signedOld = eSig && changed(requests.find(r => r.id === eSig.requestId));
+    const canSend = !eSig || signedOld;
+    const sentBefore = byRole(role).some(r => r.status !== "cancelled");
     return (
       <div key={role} className="space-y-2">
-        {signed ? (
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className={labelCls}>{label} Signature</label>
-              <button type="button" onClick={() => removeSign(signed)} className="text-xs text-red-400 font-semibold">Remove</button>
-            </div>
-            <div className="sig-paper h-20 rounded-xl border border-emerald-200 bg-white flex items-center justify-center overflow-hidden">
-              <img src={signed.signature} alt="" className="max-h-20" />
-            </div>
-            <p className="mt-1 text-[11px] text-emerald-700 leading-snug">✓ Signed electronically by {signed.typed_name} · {when(signed.signed_at)} · link sent to {signed.signer_email}</p>
-          </div>
-        ) : (
-          <SignatureField label={`${label} Signature`} value={f[sigKey]} onChange={v => set(sigKey, v)} />
-        )}
+        <div>
+          <SignatureField label={`${label} Signature`} value={f[sigKey]} onChange={v => setSig(role, v)} />
+          {eSig && (
+            <p className="mt-1 text-[11px] text-emerald-700 leading-snug">
+              ✓ Signed electronically by {eSig.typedName} · {when(eSig.signedAt)}{eSig.email ? ` · link sent to ${eSig.email}` : ""}
+            </p>
+          )}
+        </div>
         <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2.5 space-y-2">
           {pending && (
             <p className="text-[11px] text-slate-500 leading-snug">
@@ -1582,18 +1586,13 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
             </p>
           )}
           {!pending && expired && <p className="text-[11px] text-slate-500">Link sent {day(expired.created_at)} expired on {day(expired.expires_at)}.</p>}
-          {!pending && revoked && (
-            <p className="text-[11px] text-slate-500 leading-snug">
-              Removed the signature by {revoked.typed_name || revoked.signer_name} (signed {day(revoked.signed_at)}){revoked.revoked_at ? ` on ${day(revoked.revoked_at)}` : ""}.
-            </p>
-          )}
           {pending && changed(pending) && <p className="text-[11px] text-amber-700">Details changed since this was sent — send again so they sign the latest version.</p>}
-          {signed && changed(signed) && <p className="text-[11px] text-amber-700">Details changed after they signed — send again for a signature on the latest version.</p>}
+          {signedOld && <p className="text-[11px] text-amber-700">Details changed after they signed — send again for a signature on the latest version.</p>}
           {canSend && (
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" onClick={() => sendToSign(role)} disabled={!!sending}
                 className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold disabled:opacity-50">
-                {sending === role ? "Preparing…" : pending || expired || signed || revoked ? "✉ Send again" : "✉ Send to sign by email"}
+                {sending === role ? "Preparing…" : sentBefore ? "✉ Send again" : "✉ Send to sign by email"}
               </button>
               {pending && (
                 <button type="button" onClick={() => cancelSign(pending)}
@@ -1645,7 +1644,7 @@ function AgreementView({ loan, fmt, onBack, onSave, flash }) {
         )}
       </div>
 
-      <AgreementDocument loan={loan} f={docF} fmt={fmt} eSigned={eSigned} />
+      <AgreementDocument loan={loan} f={f} fmt={fmt} eSigned={eSigned} />
 
       {shareSheet && (
         <div className="no-print fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center p-4 animate-fade-in"

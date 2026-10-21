@@ -76,44 +76,21 @@ Only the `agreement-sign` function (service role) can set `signed` or write the
 signature/evidence columns. No client can delete a request; deleting the loan
 removes its requests (cascade).
 
-### Update: "Remove" a remote signature (status `revoked`)
+### The signature lands on the agreement
 
-The lender can take a remote signature off the agreement. The row — signature,
-typed name, time, IP, device — is kept as a record; it just stops being used.
-A trigger allows only these status changes, for every role including the
-service role: `sent → signed | cancelled`, `signed → revoked`.
+When someone signs, the function also writes the signature into the loan
+agreement (`agreements.data`), in the same field a drawn signature uses
+(`sigBorrower` / `sigGuarantor`), plus:
 
-```sql
-alter table public.signing_requests drop constraint signing_requests_status_check;
-alter table public.signing_requests add constraint signing_requests_status_check
-  check (status in ('sent', 'signed', 'cancelled', 'revoked'));
-alter table public.signing_requests add column revoked_at timestamptz;
+- `eSign[role]` — `{ requestId, signedAt, typedName, email }`, shown as
+  "✓ Signed electronically by …" under the signature while it is on the agreement;
+- `eSignApplied` — ids of link signatures already placed on the agreement.
 
-create or replace function public.signing_requests_guard() returns trigger
-language plpgsql set search_path = '' as $$
-begin
-  if new.status is distinct from old.status and not (
-       (old.status = 'sent' and new.status in ('signed', 'cancelled'))
-    or (old.status = 'signed' and new.status = 'revoked')) then
-    raise exception 'signing request cannot go from % to %', old.status, new.status
-      using errcode = 'check_violation';
-  end if;
-  -- revoked_at is stamped here, never taken from the client
-  new.revoked_at := case when new.status = 'revoked' and old.status = 'signed' then now() else old.revoked_at end;
-  return new;
-end $$;
-create trigger signing_requests_guard before update on public.signing_requests
-  for each row execute function public.signing_requests_guard();
-
--- The app may cancel a pending link or remove (revoke) a signed one — nothing else.
-drop policy signing_cancel on public.signing_requests;
-create policy signing_update on public.signing_requests for update to authenticated
-  using (status in ('sent', 'signed') and ((select public.is_admin()) or ((select public.is_approved()) and user_id = (select auth.uid())
-    and exists (select 1 from public.loans l where l.id = signing_requests.loan_id and l.user_id = (select auth.uid())))))
-  with check (status in ('cancelled', 'revoked'));
-```
-
-Opening a link whose signature was removed returns code `revoked`.
+So it shows, prints and can be **removed** like any signature (Remove → Save).
+A removed one stays removed: its id is in `eSignApplied`, so the app never puts it
+back. If the agreement write ever fails, or the screen was open while they signed,
+the app places any signed link that isn't in `eSignApplied` when the agreement is
+opened, so a Save can't drop it.
 
 ## Function
 
@@ -124,7 +101,7 @@ secrets as `send-push`; no new secrets).
 
 POST `{ action: "get", token }` · POST `{ action: "sign", token, signature, typedName, consent }`.
 Expected outcomes return `200 { ok: false, code, message }` with codes
-`invalid | expired | cancelled | revoked | signed | bad_signature | bad_name | no_consent`.
+`invalid | expired | cancelled | signed | bad_signature | bad_name | no_consent`.
 
 ## Notes
 

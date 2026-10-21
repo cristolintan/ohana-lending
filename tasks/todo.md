@@ -291,15 +291,15 @@ row), but the passed period's interest is not collected — it is added to the n
 - **Follow-up:** Commit + push (GitHub Pages) so links open the new SignPage; rotate the secrets in PUSH_SETUP.md
   (public repo) — needs user OK.
 
-# Agreement: "Remove" for a remote (emailed-link) signature
+# Agreement: remote signature saved INTO the loan agreement, removable (user correction)
 
-- [ ] DB (live, after user OK): status 'revoked' + revoked_at; trigger enforces transitions (sent→signed/cancelled,
-      signed→revoked only) and stamps revoked_at; app may update status to cancelled|revoked only (RLS)
-- [x] agreement-sign: revoked link → "signature was removed" message (v2)
-- [x] app.js: Remove button on the signed card (confirm) → revoke → falls back to drawn signature + Send again;
-      "Removed signature by X (signed …) on …" line; document stops using it
-- [ ] Verify: esbuild; stub tests (remove/confirm/cancel-dialog/doc); live: revoke allowed, revoked→signed and
-      signed→cancelled blocked, revoked link message; temp test loan deleted
-- Progress: app + function code done; stub tests 45/45 (6 new: confirm-cancel no-op, revoke write, fallback UI, doc
-  without signature, signer 'revoked' message). SQL written to supabase/E_SIGN_SETUP.md. **Live DB + function v2 waiting
-  for user OK.**
+User: "the signature only saves in the link — I want it in the loan agreement, with a button to remove it."
+Replaces the 'revoked' plan (no DB change needed; that SQL was never applied).
+
+- [ ] agreement-sign v2: on sign, also write the signature into agreements.data (sigBorrower/sigGuarantor) +
+      eSign[role] caption meta + eSignApplied[] (request ids already placed); never fail the signer if that write fails
+- [ ] app.js: borrower/guarantor use the normal SignatureField (Draw/Upload/Remove) + "Signed electronically" caption;
+      signed links not yet on the agreement are merged into the open form (so Save can't drop them); a removed one
+      stays removed (eSignApplied); drop revoke code; doc hash + snapshot ignore eSign fields
+- [ ] Verify: esbuild; stub tests (merge, caption, Remove+Save persists, reopen stays removed, server-applied case);
+      after user OK: deploy v2 + live check on a temp test loan (signature lands in agreements.data), delete it
