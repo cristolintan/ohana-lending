@@ -298,8 +298,11 @@ Replaces the 'revoked' plan (no DB change needed; that SQL was never applied).
 
 - [ ] agreement-sign v2: on sign, also write the signature into agreements.data (sigBorrower/sigGuarantor) +
       eSign[role] caption meta + eSignApplied[] (request ids already placed); never fail the signer if that write fails
-- [ ] app.js: borrower/guarantor use the normal SignatureField (Draw/Upload/Remove) + "Signed electronically" caption;
+- [x] app.js: borrower/guarantor use the normal SignatureField (Draw/Upload/Remove) + "Signed electronically" caption;
       signed links not yet on the agreement are merged into the open form (so Save can't drop them); a removed one
       stays removed (eSignApplied); drop revoke code; doc hash + snapshot ignore eSign fields
 - [ ] Verify: esbuild; stub tests (merge, caption, Remove+Save persists, reopen stays removed, server-applied case);
       after user OK: deploy v2 + live check on a temp test loan (signature lands in agreements.data), delete it
+- Progress: app + function v2 code done (local). Stub tests: e-sign 46/46 (merge into box + caption, Remove → Save
+  stored removed + eSignApplied, reopen stays removed, server-placed not doubled), agreement 27/27, balance 12/12.
+  **Deploy agreement-sign v2 waiting for user OK.** The 'revoked' SQL was never applied and is removed from the docs.
