@@ -306,3 +306,62 @@ Replaces the 'revoked' plan (no DB change needed; that SQL was never applied).
 - Progress: app + function v2 code done (local). Stub tests: e-sign 46/46 (merge into box + caption, Remove → Save
   stored removed + eSignApplied, reopen stays removed, server-placed not doubled), agreement 27/27, balance 12/12.
   **Deploy agreement-sign v2 waiting for user OK.** The 'revoked' SQL was never applied and is removed from the docs.
+
+# Cash Flow chart: "Cash in vs cash out" → "Money lent vs collected"
+
+- [x] Buckets count only loan releases (lent) and payments collected; capital, withdrawals, expenses, other entries
+      left out (a period with only those gets no bar); expected dues stay as "Expected" collections when projected is on
+- [x] Card title, legend (Lent / Collected / Expected), caption, tooltips, aria-label
+- [x] sw.js → v35
+- [x] Verify: esbuild; headless with javilat snapshot — per-month lent/collected = independent sums, no March bar
+      (withdrawal only), totals 275,083 / 113,216, month view, projected on, 360px, no errors
+
+## Review
+
+- **Summary:** Chart card renamed "Money lent vs collected". Buckets count only loan releases (lent, below the line)
+  and payments collected (above); capital, withdrawals, expenses and other entries are left out, so a period with
+  only those has no bar. Expected dues still stack on collected when "Show projected" is on. Legend Lent / Collected /
+  Expected, tooltips "· lent / · collected / · expected", caption says what's excluded. Bucket fields renamed
+  inflow/outflow → collected/lent.
+- **Files changed:** app.js (cashflow buckets, FlowChart, card), sw.js (v35)
+- **Tests run:** esbuild parse OK. Headless, javilat snapshot, 360px: 12/12 — all 8 months' bars equal independent
+  per-month sums (lent 275,083 / collected 113,216), Mar 2026 (withdrawal only) has no bar, expected = ₱189,379 with
+  projected on, October month view 51,000 / 25,400; no overflow, no errors. Running balance regression 12/12.
+- **Known risks:** Not tried on a phone. The "Lending activity" card already showed the same released/collected totals.
+- **Follow-up:** Commit + push.
+- [x] Follow-up (user): both bars upward from one base line, side by side — Lent (left, amber), Collected (right, green),
+      Expected stacked on Collected. Caption updated. Chart check 15/15 (new: every lent/collected bar starts on the base
+      line and goes up; lent left of collected; expected sits on its collected bar). sw.js stays v35 (unshipped).
+- [x] Follow-up (user): interest collected per period. Buckets get `interest` = each payment day's rise in the loan's
+      realized interest (same split as the card's "Interest collected"). Chart: violet top slice of the collected bar +
+      compact amount under each period label (₱3.8k); legend "Interest"; caption updated. Chart check 20/20: per-month
+      interest = hand-computed from installments (Jun 1,940 · Jul 3,790 · Aug 3,410 · Sep 3,176 · Oct 2,400), total
+      14,716 = card, October month view 2,400 = card; slices sit on top of their collected bar. sw.js stays v35.
+
+# Loans tab: "Share" all borrowers with their loan amounts (image)
+
+- [x] Share button in the Loans search/sort bar (icon on phones, "Share" on sm+), same flow as Payments → Share:
+      render off-screen doc → preview sheet → share sheet / download
+- [x] `#loans-export-doc`: JAVILAT LENDING · title from the current tab (Active / Overdue / Paid / All, + search),
+      as-of date, count; tiles Loaned out / Total to repay / Collected / Balance; table No. · Borrower (ref, released)
+      · Amount · Total to pay · Paid · Balance · Next due · Status; totals row. Exactly the list on screen (filter/search/sort)
+- [x] Dark mode: pin the doc to light paper colours like #status-export-doc (index.html)
+- [x] Verify: esbuild; headless (javilat snapshot) — rows/totals = list, filter/search respected, preview opens, image
+      size, light colours in dark mode, 360px, no errors
+
+## Review
+
+- **Summary:** Share button (share icon; "Share" label on wider screens) in the Loans search/sort bar. Renders
+  `#loans-export-doc` (760px) through the existing captureToShare → preview sheet → share sheet / download flow.
+  Content = exactly the list on screen (tab, search, sort): JAVILAT LENDING, title ("Active loans", "All loans
+  matching “Lori”"…), as-of date + count, tiles Loaned out / Total to repay / Collected / Balance, table No. ·
+  Borrower (ref, released) · Amount · Total to pay · Paid · Balance · Next due (date + amount, red "overdue", or
+  "Fully paid"), totals row. Status folded into Next due to keep 7 readable columns. Disabled when the list is empty.
+- **Files changed:** app.js (exportLoansPng, button, export doc), index.html (dark-mode pins shared with
+  #status-export-doc), sw.js stays v35 (unshipped)
+- **Tests run:** esbuild OK. Headless, javilat snapshot, dark mode, 360px: 17/17 — rows = on-screen list in order;
+  Active totals 209,083 lent / 189,379 balance (= Cash Flow "Loaned out" / "Expected back"); All 19 rows, 275,083 /
+  113,216 (= Cash Flow); search follows; tiles = totals; paid + balance = total to pay per row; preview opens with a
+  1520×2368 image; image stays light in dark mode; empty list disables Share; no overflow; no errors.
+- **Known risks:** Not tried on a phone's share sheet (same path as Payments → Share). Long lists make a tall image.
+- **Follow-up:** Commit + push.

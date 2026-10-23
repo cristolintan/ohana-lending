@@ -881,30 +881,38 @@ function ScreenSkeleton({ label, tiles = 2, chart = true }) {
 }
 
 // ─── Lightweight inline-SVG charts (no dependency, print- and offline-friendly) ─
-// Cash In vs Cash Out. Money in grows up from a centre axis, money out grows
-// down from it, so "am I collecting more than I'm releasing?" is answered by
-// which side of the line is taller — no axis reading, no legend hunting.
-// `data` is [{ key, label, inflow, outflow, projIn, projected }].
+// Money Lent vs Collected. Each period gets a pair of upward bars from the same
+// base line — lent (loan releases) on the left, collected on the right — so
+// "am I collecting more than I'm lending?" is answered by which bar is taller.
+// The interest inside each collected bar is its violet top, and its amount is
+// written under the period label so it reads on a phone without hovering.
+// Expected dues stack on top of collected when projections are shown.
+// `data` is [{ key, label, collected, lent, interest, projIn, projected }].
+const pesoShort = v => v >= 1000 ? `₱${(v / 1000).toFixed(v >= 9950 ? 0 : 1).replace(/\.0$/, "")}k` : `₱${Math.round(v)}`;
 function FlowChart({ data, fmt }) {
   if (!data.length) return <EmptyPanel icon="bar-chart-3" title="Nothing to chart yet" body="Collections and loan releases in this period will plot here." />;
-  const max = Math.max(1, ...data.map(d => Math.max(d.inflow + (d.projIn || 0), d.outflow)));
+  const max = Math.max(1, ...data.map(d => Math.max(d.collected + (d.projIn || 0), d.lent)));
   const barW = data.length > 16 ? 8 : data.length > 8 ? 14 : 20;
   const groupW = barW * 2 + (data.length > 16 ? 8 : 16);
-  const half = 62, labelH = 20, W = Math.max(data.length * groupW, 40), H = half * 2 + labelH;
-  const h = v => (v <= 0 ? 0 : Math.max(2, (v / max) * (half - 6)));
+  const anyInterest = data.some(d => d.interest >= 0.005);
+  const plotH = 124, labelH = anyInterest ? 32 : 20, W = Math.max(data.length * groupW, 40), H = plotH + labelH;
+  const h = v => (v <= 0 ? 0 : Math.max(2, (v / max) * (plotH - 8)));
   return (
     <div className="overflow-x-auto px-4 pb-3 pt-1">
-      <svg width={W} height={H} className="block" role="img" aria-label="Cash in versus cash out">
-        <line x1="0" y1={half} x2={W} y2={half} stroke="currentColor" className="text-slate-300" strokeWidth="1" />
+      <svg width={W} height={H} className="block" role="img" aria-label="Money lent versus collected">
+        <line x1="0" y1={plotH} x2={W} y2={plotH} stroke="currentColor" className="text-slate-300" strokeWidth="1" />
         {data.map((d, i) => {
           const cx = i * groupW + groupW / 2;
-          const inH = h(d.inflow), projH = h(d.projIn || 0), outH = h(d.outflow);
+          const lentH = h(d.lent), colH = h(d.collected), projH = h(d.projIn || 0);
+          const intH = colH > 0 && d.interest >= 0.005 ? Math.max(1.5, colH * Math.min(1, d.interest / d.collected)) : 0;
           return (
             <g key={d.key}>
-              {inH > 0 && <rect x={cx - barW - 1} y={half - inH} width={barW} height={inH} rx="2" fill="#10b981"><title>{`${d.label} · in ${fmt(d.inflow)}`}</title></rect>}
-              {projH > 0 && <rect x={cx - barW - 1} y={half - inH - projH} width={barW} height={projH} rx="2" fill="#6ee7b7" opacity="0.75"><title>{`${d.label} · expected ${fmt(d.projIn)}`}</title></rect>}
-              {outH > 0 && <rect x={cx + 1} y={half} width={barW} height={outH} rx="2" fill="#f59e0b"><title>{`${d.label} · out ${fmt(d.outflow)}`}</title></rect>}
-              <text x={cx} y={H - 6} textAnchor="middle" fontSize="9" fill={d.projected ? "#6a6a72" : "#94a3b8"}>{d.label}</text>
+              {lentH > 0 && <rect x={cx - barW - 1} y={plotH - lentH} width={barW} height={lentH} rx="2" fill="#f59e0b"><title>{`${d.label} · lent ${fmt(d.lent)}`}</title></rect>}
+              {colH > 0 && <rect x={cx + 1} y={plotH - colH} width={barW} height={colH} rx="2" fill="#10b981"><title>{`${d.label} · collected ${fmt(d.collected)}`}</title></rect>}
+              {intH > 0 && <rect x={cx + 1} y={plotH - colH} width={barW} height={intH} rx="2" fill="#8b5cf6"><title>{`${d.label} · interest ${fmt(d.interest)}`}</title></rect>}
+              {projH > 0 && <rect x={cx + 1} y={plotH - colH - projH} width={barW} height={projH} rx="2" fill="#6ee7b7" opacity="0.75"><title>{`${d.label} · expected ${fmt(d.projIn)}`}</title></rect>}
+              <text x={cx} y={plotH + 14} textAnchor="middle" fontSize="9" fill={d.projected ? "#6a6a72" : "#94a3b8"}>{d.label}</text>
+              {d.interest >= 0.005 && <text x={cx} y={plotH + 27} textAnchor="middle" fontSize="9" fontWeight="600" fill="#a78bfa">{pesoShort(d.interest)}</text>}
             </g>
           );
         })}
@@ -2166,6 +2174,17 @@ function App() {
       `Payment Status - ${l.borrower} - ${fmtDate(new Date())}.png`, "Status image ready", `${l.borrower} · ${l.ref || ""}`.trim());
   };
 
+  // Loans tab: the list exactly as filtered, searched and sorted on screen, as
+  // one image for the group chat.
+  const loansExportTitle = `${{ active: "Active loans", overdue: "Overdue loans", paid: "Fully paid loans", all: "All loans" }[recordFilter] || "Loans"}${
+    recordSearch.trim() ? ` matching “${recordSearch.trim()}”` : ""}`;
+  const exportLoansPng = () => {
+    if (!filteredLoans.length) return;
+    return captureToShare("loans-export-doc",
+      `Loans - ${loansExportTitle.replace(/[“”]/g, "")} - ${fmtDate(new Date())}.png`, "Loans image ready",
+      `${loansExportTitle} · ${filteredLoans.length} loan${filteredLoans.length !== 1 ? "s" : ""}`);
+  };
+
   // Renders an off-screen export document to a PNG and opens the preview sheet
   // (title/subtitle label that sheet), from which it is shared with a fresh tap.
   const captureToShare = async (elId, filename, title, subtitle) => {
@@ -2559,8 +2578,12 @@ function App() {
     // Each day's heading carries the running balance at its close.
     days.forEach(d => { const c = closing.get(d.date); d.balance = c.balance; d.projected = c.projected; });
 
-    // ── Chart buckets. Same rows, three groupings — day, week, or month. ──
-    const events = [...inRange, ...projectedInRange].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    // ── Chart buckets: money lent vs collected. Loan releases and payments only —
+    // capital, withdrawals and expenses aren't lending, so a period with only
+    // those gets no bar. Same rows, three groupings — day, week, or month. ──
+    const events = [...inRange, ...projectedInRange]
+      .filter(t => t.projected || t.kind === "Disbursement" || t.kind === "Collection")
+      .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
     const bucket = t => {
       if (cfAgg === "monthly" || cfAllTime) return { key: t.date.slice(0, 7), label: monthLabelShort(t.date.slice(0, 7)) };
       if (cfAgg === "daily") return { key: t.date, label: String(Number(t.date.slice(8, 10))) };
@@ -2568,11 +2591,25 @@ function App() {
       return { key: `${t.date.slice(0, 7)}-W${w}`, label: `W${w + 1}` };
     };
     const bMap = {};
+    const slot = date => {
+      const b = bucket({ date });
+      return bMap[b.key] || (bMap[b.key] = { key: b.key, label: b.label, collected: 0, lent: 0, interest: 0, projIn: 0, projected: date.slice(0, 7) > curMonth });
+    };
     events.forEach(t => {
-      const b = bucket(t);
-      if (!bMap[b.key]) bMap[b.key] = { key: b.key, label: b.label, inflow: 0, outflow: 0, projIn: 0, projected: t.date.slice(0, 7) > curMonth };
-      if (t.projected) bMap[b.key].projIn += t.inflow;
-      else { bMap[b.key].inflow += t.inflow; bMap[b.key].outflow += t.outflow; }
+      const s = slot(t.date);
+      if (t.projected) s.projIn += t.inflow;
+      else if (t.kind === "Collection") s.collected += t.inflow;
+      else s.lent += t.outflow;
+    });
+    // Interest collected, dated by payment: each payment day's rise in the loan's
+    // realized interest — the same split the period's "Interest collected" uses,
+    // so the bars add up to it.
+    db.loans.forEach(l => {
+      const dates = new Set(db.payments.filter(p => p.loanId === l.id && p.date >= start && p.date <= end).map(p => p.date));
+      dates.forEach(d => {
+        const inc = realizedInterestUpTo(l, db.payments, d, true) - realizedInterestUpTo(l, db.payments, d, false);
+        if (Math.abs(inc) >= 0.005) slot(d).interest += inc;
+      });
     });
     const buckets = Object.values(bMap).sort((a, b) => a.key < b.key ? -1 : 1);
 
@@ -3731,6 +3768,12 @@ function App() {
                     <option value="balance">Balance</option>
                     <option value="name">Name</option>
                   </select>
+                  <button onClick={() => { buzz(); exportLoansPng(); }} disabled={exportBusy || filteredLoans.length === 0}
+                    aria-label="Share these loans" title="Share these loans as an image"
+                    className="shrink-0 h-[42px] px-3 rounded-xl border border-slate-100 bg-white text-slate-500 active:bg-slate-100 disabled:opacity-50 text-xs font-semibold flex items-center gap-1.5 transition">
+                    <i data-lucide={exportBusy ? "loader" : "share-2"} className={`w-4 h-4 ${exportBusy ? "animate-spin" : ""}`}></i>
+                    <span className="hidden sm:inline">{exportBusy ? "Preparing…" : "Share"}</span>
+                  </button>
                 </div>
               </div>
 
@@ -4429,14 +4472,15 @@ function App() {
                 <p className="text-[11px] text-slate-400 leading-relaxed">Counts everything past due plus unpaid installments due on or before {fmtDate(parseDate(forecast.horizon))}, less borrowers queued for release by then.</p>
               </div>
 
-              {/* ── 5 · CASH IN vs CASH OUT ── */}
+              {/* ── 5 · MONEY LENT vs COLLECTED ── */}
               <div className={`${cardCls} overflow-hidden md:col-span-6 lg:col-span-7`}>
                 <div className="p-4 pb-3 space-y-3">
-                  <CardHead title="Cash in vs cash out" hint={cfAllTime ? "Monthly totals, all time" : `${cfAgg === "daily" ? "Daily" : cfAgg === "weekly" ? "Weekly" : "Monthly"} totals`}
+                  <CardHead title="Money lent vs collected" hint={cfAllTime ? "Monthly totals, all time" : `${cfAgg === "daily" ? "Daily" : cfAgg === "weekly" ? "Weekly" : "Monthly"} totals`}
                     right={
                       <div className="flex flex-col items-end gap-1 text-[11px] text-slate-400 shrink-0">
-                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#10b981" }} />In</span>
-                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#f59e0b" }} />Out</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#f59e0b" }} />Lent</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#10b981" }} />Collected</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#8b5cf6" }} />Interest</span>
                         {cfProjected && <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: "#6ee7b7" }} />Expected</span>}
                       </div>
                     } />
@@ -4446,7 +4490,7 @@ function App() {
                   )}
                 </div>
                 <FlowChart data={cashflow.buckets} fmt={fmt} />
-                <p className="px-4 pb-3 text-[11px] text-slate-400">Bars above the line are cash coming in; below the line is cash going out.</p>
+                <p className="px-4 pb-3 text-[11px] text-slate-400">For each period: money lent out (left) next to payments collected (right). The violet top of a collected bar is the interest in it — the amount is under the period. Capital, withdrawals and expenses aren't included.</p>
               </div>
 
               {/* ── 6 · CASH POSITION TREND ── */}
@@ -4851,6 +4895,94 @@ function App() {
                 </div>
               </div>
             )}
+          </div>
+        );
+      })()}
+
+      {/* ── Loans export document ─────────────────────────────────────────────
+          What the Loans tab's Share captures: the list as it stands on screen
+          (tab, search, sort), laid out at a readable width for a group chat.
+          Off-screen like the others; rendered only while the Loans tab is open. */}
+      {tab === "records" && filteredLoans.length > 0 && (() => {
+        const rows = filteredLoans.map(({ l, s, paid, missed, nextRow }) => ({
+          l, paid, missed, nextRow,
+          toPay: round2(Number(l.amount) + s.summedInterest), collected: round2(s.totalLogged), left: s.grandLeft,
+        }));
+        const total = k => round2(rows.reduce((a, r) => a + (k === "amount" ? Number(r.l.amount) : r[k]), 0));
+        const tiles = [
+          ["Loaned out", total("amount"), "bg-slate-50", "text-slate-500", "text-slate-900"],
+          ["Total to repay", total("toPay"), "bg-slate-50", "text-slate-500", "text-slate-900"],
+          ["Collected", total("collected"), "bg-emerald-50", "text-emerald-600", "text-emerald-700"],
+          ["Balance", total("left"), "bg-amber-50", "text-amber-600", "text-amber-700"],
+        ];
+        const th = "px-2 py-2.5 text-[11px] font-bold uppercase tracking-wide";
+        return (
+          <div id="loans-export-doc" aria-hidden="true"
+            style={{ position: "fixed", top: 0, left: "-10000px", background: "#ffffff", width: "760px" }}>
+            <div className="px-6 pt-7 pb-5">
+              <p className="text-[13px] font-bold tracking-[0.18em] text-emerald-600">JAVILAT LENDING</p>
+              <p className="mt-1 text-3xl font-bold text-slate-900 leading-tight">{loansExportTitle}</p>
+              <p className="mt-2 text-[15px] text-slate-500">
+                As of <span className="font-semibold text-slate-700">{fmtDate(new Date())}</span>
+                <span className="text-slate-300"> · </span>{rows.length} loan{rows.length !== 1 ? "s" : ""}
+              </p>
+              <div className="mt-5 grid grid-cols-4 gap-3">
+                {tiles.map(([label, v, bg, tl, tv]) => (
+                  <div key={label} className={`rounded-2xl ${bg} px-3 py-3`}>
+                    <p className={`text-[11px] font-semibold uppercase tracking-wide ${tl}`}>{label}</p>
+                    <p className={`mt-1 text-xl font-bold tabular-nums ${tv}`}>{fmt(v)}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <table className="w-full text-[14px] leading-5" style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr className="bg-slate-100 text-slate-500">
+                  <th className={`pl-6 pr-2 py-2.5 text-[11px] font-bold uppercase tracking-wide text-left`}>No.</th>
+                  <th className={`${th} text-left`}>Borrower</th>
+                  <th className={`${th} text-right`}>Amount</th>
+                  <th className={`${th} text-right`}>Total to pay</th>
+                  <th className={`${th} text-right`}>Paid</th>
+                  <th className={`${th} text-right`}>Balance</th>
+                  <th className={`pl-2 pr-6 py-2.5 text-[11px] font-bold uppercase tracking-wide text-left`}>Next due</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.l.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
+                    <td className="pl-6 pr-2 py-2 font-semibold text-slate-500 align-top">{i + 1}</td>
+                    <td className="px-2 py-2 align-top">
+                      <span className="block font-semibold text-slate-900">{r.l.borrower}</span>
+                      <span className="block text-[12px] text-slate-500">{r.l.ref} · released {fmtDate(parseDate(r.l.releaseDate || r.l.startDate))}</span>
+                    </td>
+                    <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-slate-900 align-top">{fmt(r.l.amount)}</td>
+                    <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-slate-700 align-top">{fmt(r.toPay)}</td>
+                    <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap text-emerald-700 align-top">{fmt(r.collected)}</td>
+                    <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap font-semibold text-slate-900 align-top">{fmt(r.left)}</td>
+                    <td className="pl-2 pr-6 py-2 whitespace-nowrap align-top">
+                      {r.paid ? <span className="font-bold text-emerald-700">Fully paid</span>
+                        : !r.nextRow ? <span className="text-slate-500">—</span>
+                        : <>
+                            <span className={`block font-semibold ${r.missed > 0 ? "text-red-600" : "text-slate-800"}`}>{fmtDate(r.nextRow.due)}</span>
+                            <span className={`block text-[12px] ${r.missed > 0 ? "text-red-600" : "text-slate-500"}`}>
+                              {fmt(r.nextRow.amtLeft)}{r.missed > 0 ? ` · overdue${r.missed > 1 ? ` (${r.missed})` : ""}` : ""}
+                            </span>
+                          </>}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="bg-emerald-50">
+                  <td className="pl-6 pr-2 py-3 font-bold text-emerald-800" colSpan={2}>Total</td>
+                  <td className="px-2 py-3 text-right font-bold text-slate-900 tabular-nums whitespace-nowrap">{fmt(total("amount"))}</td>
+                  <td className="px-2 py-3 text-right font-bold text-slate-900 tabular-nums whitespace-nowrap">{fmt(total("toPay"))}</td>
+                  <td className="px-2 py-3 text-right font-bold text-emerald-700 tabular-nums whitespace-nowrap">{fmt(total("collected"))}</td>
+                  <td className="px-2 py-3 text-right font-bold text-slate-900 tabular-nums whitespace-nowrap">{fmt(total("left"))}</td>
+                  <td className="pl-2 pr-6 py-3"></td>
+                </tr>
+              </tbody>
+            </table>
+            <div className="h-6"></div>
           </div>
         );
       })()}
