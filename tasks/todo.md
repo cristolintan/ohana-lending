@@ -365,3 +365,44 @@ Replaces the 'revoked' plan (no DB change needed; that SQL was never applied).
   1520×2368 image; image stays light in dark mode; empty list disables Share; no overflow; no errors.
 - **Known risks:** Not tried on a phone's share sheet (same path as Payments → Share). Long lists make a tall image.
 - **Follow-up:** Commit + push.
+
+# Switch accounts without signing out
+
+- [x] Remember each signed-in account's latest tokens on this device (localStorage `ohana_accounts_v1`, refreshed on
+      every auth event because refresh tokens rotate). Switch = sb.auth.setSession — never signOut (global sign-out
+      would end that account's sign-in on every device). Expired/revoked → mark "sign in again", restore previous.
+- [x] Header: account pill (initial + name) → Accounts sheet: list (tap to switch, Remove), "+ Add another account"
+      (email/password, current one stays remembered), "Sign out of …" (also forgets it here)
+- [x] Sign-in screen: "Continue as …" for remembered accounts (also on the pending-approval screen)
+- [x] Safety: on account change clear the previous account's records/selections before repainting; snapshot saved
+      under the account whose data is on screen (was: session user — could write A's data into B's cache);
+      offline outbox items tagged with their account and only shown/synced for that account
+- [x] sw.js → v36 (v35 was committed meanwhile)
+- [x] Verify: esbuild; headless with a 2-user auth stub — switch both ways, data never mixes (screen + snapshots),
+      add account, sign out → continue as, expired token → "sign in again" + previous restored, offline entry
+      for A not synced as B and synced on switching back, 360px header, no errors
+
+## Review
+
+- **Summary:** Header "Sign out" → account pill (initial + name). Accounts sheet: remembered accounts (tap to switch,
+  Remove), "+ Add another account" (email/password; the current one stays remembered), "Sign out of …" (also forgets
+  it here), shared-phone note, unsynced-entries note. Sign-in screen: "Continue as …" (and "Switch to" on the
+  pending-approval screen). Switching = sb.auth.setSession with the remembered tokens (copy refreshed on every auth
+  event since refresh tokens rotate); never signOut. Expired/revoked → previous account restored, that account marked
+  "Signed out — tap to sign in", password form prefilled.
+- **Safety fixes found on the way:** (1) on account change the previous account's records/selections are cleared
+  before repainting; (2) the offline cache is saved under the account whose data is on screen (was the session's —
+  could write A's records into B's cache, pre-existing on sign-out → sign-in too); (3) offline outbox items are tagged
+  with their account, only shown/synced for it, and approval is tracked per account so switching back triggers the
+  sync; (4) toasts clear only themselves (an older timer cut newer messages short).
+- **Files changed:** app.js, sw.js (v36)
+- **Tests run:** esbuild OK. New harness with a two-user Supabase-like auth stub (rotating refresh tokens, revocation,
+  network failures), 360px: 23/23 — sign in, add account, one-tap switch both ways (setSession only, no signOut, no
+  password), caches never mix, rotated token remembered and still switches, offline entry made as Ana not synced as
+  Ben and synced on switching back (into Ana), expired account → stays on Ana + prefilled password form → signs in,
+  sign out forgets + clears cache + "Continue as", reload keeps everything, header fits, no errors.
+  Regression: e-sign 46/46, agreement 27/27, running balance 12/12, chart 20/20, loans share 17/17.
+- **Known risks:** Not tried on a phone or against real Supabase (the stub mimics its token rotation). Anyone holding
+  the unlocked phone can switch between remembered accounts (stated in the sheet). Push notifications stay with the
+  account that turned them on for this phone. Switching needs a connection.
+- **Follow-up:** Commit + push; on the phone sign in to both accounts once, then switch from the pill.
