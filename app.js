@@ -135,6 +135,17 @@ function saveSnapshot(uid, db) {
   } catch (e) { console.warn("snapshot skipped", e); }   // quota / private mode
 }
 
+// ─── Accounts remembered on this device (one-tap switching) ───────────────────
+// Each signed-in account's latest tokens, so switching is a setSession() — no
+// password, and no sign-out (which would end that account's sign-in on every
+// device). Supabase rotates refresh tokens, so the copy here is refreshed on
+// every auth event; a token that has been used once stops working.
+const ACCOUNTS_KEY = "ohana_accounts_v1";
+const savedAccounts = {
+  all() { try { return JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}") || {}; } catch { return {}; } },
+  write(m) { try { localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(m)); } catch {} },
+};
+
 // ─── Offline outbox (IndexedDB, localStorage fallback) ────────────────────────
 // Writes made without a connection are queued here and replayed when the network
 // comes back. Every queued row carries a client-generated UUID, so replaying an
@@ -1832,6 +1843,21 @@ function App() {
   const [authMsg, setAuthMsg] = useState("");
   const [approved, setApproved] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  // Accounts remembered on this device; the active one is whatever `session` holds.
+  const [accounts, setAccounts] = useState(() => savedAccounts.all());
+  const [acctOpen, setAcctOpen] = useState(false);
+  const [addingAcct, setAddingAcct] = useState(false);
+  const [switching, setSwitching] = useState(null);       // id of the account being switched to
+  const rememberSession = useCallback(s => {
+    if (!s || !s.user || s.user.is_anonymous || !s.refresh_token) return;
+    const m = savedAccounts.all();
+    m[s.user.id] = { id: s.user.id, email: s.user.email, access_token: s.access_token, refresh_token: s.refresh_token, lastUsed: Date.now() };
+    savedAccounts.write(m); setAccounts(m);
+  }, []);
+  const forgetAccount = useCallback(id => {
+    const m = savedAccounts.all(); delete m[id];
+    savedAccounts.write(m); setAccounts(m);
+  }, []);
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminUsers, setAdminUsers] = useState([]);
   const [adminPending, setAdminPending] = useState([]);
@@ -1960,7 +1986,8 @@ function App() {
   });
   const [updateReady, setUpdateReady] = useState(false);
 
-  const flash = msg => { setToast(msg); setTimeout(() => setToast(""), 2500); };
+  // Each message clears only itself — an older timer must not cut a newer message short.
+  const flash = msg => { setToast(msg); setTimeout(() => setToast(t => (t === msg ? "" : t)), 2500); };
   const refresh = useCallback(async () => {
     const data = await api.fetchAll();
     setDb(data);
@@ -1989,7 +2016,15 @@ function App() {
       if (s && s.user.is_anonymous) { await sb.auth.signOut(); s = null; }   // drop stale anon sessions
       if (!mounted) return;
       setSession(s);
-      if (!isUser(s)) { setApproved(false); setIsAdmin(false); setLoading(false); setAuthReady(true); return; }
+      if (!isUser(s)) { setApproved(false); setApprovedUid(null); setIsAdmin(false); setLoading(false); setAuthReady(true); return; }
+      // Another account took over (switch / add account): clear the previous
+      // one's records and selections before anything of the new one paints.
+      if (hydratedFor.current && hydratedFor.current !== s.user.id) {
+        hydratedFor.current = null;
+        setDb(EMPTY_DB); setLoading(true);
+        setTab("home"); setSheetLoanId(null); setAgreementLoanId(null);
+        setLoanIdOvr(""); setSelBorrower(""); setPaySheetOpen(false);
+      }
       let ok = false, admin = false;
       const accessKey = `ohana_access_${s.user.id}`;
       try {
@@ -2009,7 +2044,7 @@ function App() {
         } catch {}
       }
       if (!mounted) return;
-      setApproved(ok); setIsAdmin(admin);
+      setApproved(ok); setIsAdmin(admin); setApprovedUid(ok ? s.user.id : null);
       if (ok) {
         // Paint this user's own last-known data before the network answers —
         // once per user, so a token refresh doesn't undo what's on screen.
@@ -2022,23 +2057,35 @@ function App() {
       } else setLoading(false);
       setAuthReady(true);
     };
-    const { data: { subscription } } = sb.auth.onAuthStateChange((_e, s) => { apply(s); });
+    // Every event carries the freshest tokens (refresh tokens rotate) — keep the
+    // device's copy current so switching back to this account works.
+    const { data: { subscription } } = sb.auth.onAuthStateChange((_e, s) => { rememberSession(s); apply(s); });
     return () => { mounted = false; subscription.unsubscribe(); };
-  }, [loadOwn]);
+  }, [loadOwn, rememberSession]);
 
   // ─── Offline queue ──────────────────────────────────────────────────────────
   // Writes that can't reach Supabase are parked in the outbox and replayed on
   // reconnect. Replay only runs for an approved session, so a queued row is never
   // fired at the server before RLS can accept it.
   const flushing = useRef(false);
-  const approvedRef = useRef(false);
-  useEffect(() => { approvedRef.current = approved; }, [approved]);
+  // Approval is tracked per account: after a switch the new account is synced
+  // only once its own approval is confirmed, and that confirmation re-triggers a sync.
+  const [approvedUid, setApprovedUid] = useState(null);
+  const approvedRef = useRef(null);
+  useEffect(() => { approvedRef.current = approvedUid; }, [approvedUid]);
+  // Queued writes belong to the account that made them: with several accounts on
+  // one device, another account must never see or replay them (an insert would
+  // land in that account's books). Items queued before tagging belong to whoever
+  // is signed in, as before.
+  const uidRef = useRef(null);
+  useEffect(() => { uidRef.current = session && !session.user.is_anonymous ? session.user.id : null; }, [session]);
+  const mine = item => !item.uid || item.uid === uidRef.current;
 
-  const reloadQueue = useCallback(async () => { setQueued(await outbox.all()); }, []);
+  const reloadQueue = useCallback(async () => { setQueued((await outbox.all()).filter(mine)); }, []);
 
   const flushOutbox = useCallback(async () => {
-    if (flushing.current || !navigator.onLine || !approvedRef.current) return;
-    const items = await outbox.all();
+    if (flushing.current || !navigator.onLine || !uidRef.current || approvedRef.current !== uidRef.current) return;
+    const items = (await outbox.all()).filter(mine);
     if (!items.length) { setQueued([]); return; }
     flushing.current = true; setSyncing(true);
     let done = 0, rejected = 0;
@@ -2065,7 +2112,7 @@ function App() {
   // and dues stay truthful while offline. The optimistic row carries the same id
   // the server row will get, so the post-sync refresh can't duplicate it.
   const enqueue = useCallback(async (kind, payload, optimistic) => {
-    await outbox.put({ id: uuid(), kind, payload, createdAt: new Date().toISOString(), attempts: 0 });
+    await outbox.put({ id: uuid(), uid: uidRef.current, kind, payload, createdAt: new Date().toISOString(), attempts: 0 });
     await reloadQueue();
     requestOutboxSync();
     if (optimistic) setDb(prev => optimistic(prev));
@@ -2087,13 +2134,16 @@ function App() {
     window.addEventListener("offline", goOffline);
     return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
   }, [flushOutbox]);
-  useEffect(() => { reloadQueue(); }, [reloadQueue]);
-  useEffect(() => { if (approved && online) flushOutbox(); }, [approved, online, flushOutbox]);
+  useEffect(() => { reloadQueue(); }, [reloadQueue, session]);   // the queue shown is per account
+  useEffect(() => { if (approvedUid && online) flushOutbox(); }, [approvedUid, online, flushOutbox]);
 
   // Keep the offline snapshot in step with whatever is on screen — server
   // refreshes and offline writes alike. Skipped during the initial load so a
   // failed first fetch can't overwrite good data with an empty shell.
-  useEffect(() => { if (!loading && session) saveSnapshot(session.user.id, db); }, [db, loading, session]);
+  // Saved under the account whose records are on screen (hydratedFor), not the
+  // session's: right after a switch the session is already the new account while
+  // the old one's records are still painted, and must not land in its cache.
+  useEffect(() => { if (!loading && hydratedFor.current) saveSnapshot(hydratedFor.current, db); }, [db, loading, session]);
 
   // ─── Install prompt ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -2361,17 +2411,95 @@ function App() {
   };
   const signOut = async () => {
     // Unsynced work would sit invisible until someone signs in again — say so first.
-    if (queued.length && !confirm(`${queued.length} entr${queued.length === 1 ? "y hasn't" : "ies haven't"} synced yet. Sign out anyway? They stay on this device and sync at the next sign-in.`)) return;
+    if (queued.length && !confirm(`${queued.length} entr${queued.length === 1 ? "y hasn't" : "ies haven't"} synced yet. Sign out anyway? They stay on this device and sync the next time this account signs in here.`)) return;
     try {
       const uid = session?.user?.id;
       await sb.auth.signOut();
-      // Don't leave borrower records cached on a signed-out device.
+      // Don't leave borrower records cached on a signed-out device, or the
+      // account remembered for one-tap switching.
       clearSnapshot(uid);
+      if (uid) forgetAccount(uid);
       hydratedFor.current = null;
       setDb(EMPTY_DB);
+      setAcctOpen(false); setAddingAcct(false);
       flash("Signed out.");
     } catch (e) { console.error(e); flash("Sign out failed."); }
   };
+
+  // Switch to another account remembered on this device: swap the session, no
+  // sign-out. If that account's sign-in has ended (expired, signed out
+  // elsewhere), mark it and put the previous account back.
+  const switchAccount = async id => {
+    const target = savedAccounts.all()[id];
+    if (!target) return;
+    if (session && session.user.id === id) { setAcctOpen(false); return; }
+    if (!target.refresh_token) {                       // needs a password again
+      setAuthEmail(target.email); setAuthPass(""); setAuthMsg("");
+      if (session) { setAddingAcct(true); setAcctOpen(true); }
+      return;
+    }
+    if (!navigator.onLine) { flash("Switching accounts needs an internet connection."); return; }
+    setSwitching(id);
+    let before = null;
+    try {
+      ({ data: { session: before } } = await sb.auth.getSession());
+      rememberSession(before);                         // freshest tokens for the one we're leaving
+      const { error } = await sb.auth.setSession({ access_token: target.access_token, refresh_token: target.refresh_token });
+      if (error) throw error;
+      setAcctOpen(false); setAddingAcct(false);
+      flash(`Switched to ${target.email}`);
+    } catch (e) {
+      console.error(e);
+      const m = savedAccounts.all();
+      if (m[id]) { m[id] = { ...m[id], access_token: null, refresh_token: null }; savedAccounts.write(m); setAccounts(m); }
+      if (before) {
+        try { await sb.auth.setSession({ access_token: before.access_token, refresh_token: before.refresh_token }); }
+        catch (e2) { console.error(e2); }
+      }
+      setAuthEmail(target.email); setAuthPass(""); setAuthMsg("");
+      if (before) { setAddingAcct(true); setAcctOpen(true); }
+      flash(`${target.email} needs to sign in again.`);
+    } finally {
+      setSwitching(null);
+    }
+  };
+
+  // Sign in to one more account; the current one stays remembered for switching.
+  const addAccount = async () => {
+    setAuthMsg("");
+    if (!authEmail.trim() || !authPass) { setAuthMsg("Enter the email and password."); return; }
+    setAuthBusy(true);
+    try {
+      const { data: { session: before } } = await sb.auth.getSession();
+      rememberSession(before);
+      const { error } = await sb.auth.signInWithPassword({ email: authEmail.trim(), password: authPass });
+      if (error) throw error;
+      setAuthPass(""); setAddingAcct(false); setAcctOpen(false);
+      flash(`Signed in as ${authEmail.trim()}`);
+    } catch (e) { console.error(e); setAuthMsg(e.message || "Sign in failed."); }
+    finally { setAuthBusy(false); }
+  };
+  const acctList = Object.values(accounts).sort((a, b) =>
+    (session && a.id === session.user.id ? -1 : session && b.id === session.user.id ? 1 : (b.lastUsed || 0) - (a.lastUsed || 0)));
+  const initialOf = email => (String(email || "?").trim()[0] || "?").toUpperCase();
+  // One-tap buttons for remembered accounts on the sign-in / pending screens.
+  const continueAs = (list, heading) => list.length > 0 && (
+    <div className="space-y-1.5">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{heading}</p>
+      {list.map(a => (
+        <button key={a.id} type="button" disabled={!!switching} onClick={() => switchAccount(a.id)}
+          className="w-full flex items-center gap-2.5 rounded-xl bg-slate-50 px-3 py-2.5 text-left active:bg-slate-100 disabled:opacity-60 transition">
+          <span className="w-8 h-8 rounded-full bg-emerald-600 text-white text-sm font-bold flex items-center justify-center shrink-0">{initialOf(a.email)}</span>
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-slate-800 truncate">{a.email}</span>
+            <span className={`block text-[11px] ${a.refresh_token ? "text-slate-500" : "text-amber-700"}`}>
+              {switching === a.id ? "Signing in…" : a.refresh_token ? "Tap to continue" : "Signed out — enter the password below"}
+            </span>
+          </span>
+        </button>
+      ))}
+    </div>
+  );
 
   // ── Admin: manage who can access (allowlist) ──
   const loadAdmin = async () => {
@@ -3345,7 +3473,15 @@ function App() {
         </div>
         <div className="flex items-center gap-2">
           {isAdmin && <button onClick={openAdmin} className="px-3 py-1.5 rounded-lg border border-slate-100 text-slate-500 text-xs font-semibold active:bg-slate-100 transition">Admin</button>}
-          {session && !session.user.is_anonymous && <button onClick={signOut} title={session.user.email} className="px-3 py-1.5 rounded-lg border border-slate-100 text-slate-500 text-xs font-semibold active:bg-slate-100 transition">Sign out</button>}
+          {session && !session.user.is_anonymous && (
+            <button onClick={() => { setAddingAcct(false); setAuthMsg(""); setAcctOpen(true); }}
+              aria-label={`Account ${session.user.email} — switch account or sign out`} title={session.user.email}
+              className="h-8 pl-1 pr-2 rounded-full border border-slate-100 text-slate-600 text-xs font-semibold flex items-center gap-1.5 active:bg-slate-100 transition max-w-[8.5rem]">
+              <span className="w-6 h-6 rounded-full bg-emerald-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0">{initialOf(session.user.email)}</span>
+              <span className="truncate">{session.user.email.split("@")[0]}</span>
+              <i data-lucide="chevrons-up-down" className="w-3.5 h-3.5 text-slate-400 shrink-0"></i>
+            </button>
+          )}
         </div>
       </header>
 
@@ -5099,8 +5235,11 @@ function App() {
             ) : (session && !session.user.is_anonymous && !approved) ? (<>
               <p className="text-sm text-slate-600 text-center">Your account <b className="text-slate-800">{session.user.email}</b> is pending administrator approval.</p>
               <p className="text-xs text-slate-400 text-center">Ask the administrator to grant your email access, then reload.</p>
+              {continueAs(acctList.filter(a => a.id !== session.user.id), "Switch to")}
               <button onClick={signOut} className="w-full py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-100 transition">Sign out</button>
             </>) : (<>
+              {continueAs(acctList, "Continue as")}
+              {acctList.length > 0 && <p className="text-center text-[11px] text-slate-400 -mb-1">or sign in with another account</p>}
               <div>
                 <label className={labelCls}>Email</label>
                 <input type="email" autoComplete="email" className={inputCls} value={authEmail} onChange={e => setAuthEmail(e.target.value)} placeholder="you@example.com" />
@@ -5113,6 +5252,72 @@ function App() {
               <button disabled={authBusy} onClick={signIn} className="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm disabled:opacity-50 transition">{authBusy ? "Please wait…" : "Sign in"}</button>
               <button disabled={authBusy} onClick={createAccount} className="w-full py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold disabled:opacity-50 active:bg-slate-100 transition">Create account</button>
             </>)}
+          </div>
+        </div>
+      )}
+
+      {acctOpen && session && !session.user.is_anonymous && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center p-4 no-print" onClick={() => setAcctOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-5 space-y-3 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}
+            role="dialog" aria-label="Accounts">
+            <div className="flex items-center justify-between">
+              <p className="font-semibold text-slate-800">Accounts</p>
+              <button onClick={() => setAcctOpen(false)} className="text-slate-400 text-sm">Close</button>
+            </div>
+            <div className="space-y-1.5">
+              {acctList.map(a => {
+                const current = a.id === session.user.id;
+                return (
+                  <div key={a.id} className={`flex items-center gap-2 rounded-xl pl-3 pr-2 py-2.5 ${current ? "bg-emerald-50" : "bg-slate-50"}`}>
+                    <button type="button" disabled={current || !!switching} onClick={() => switchAccount(a.id)}
+                      className="flex-1 min-w-0 flex items-center gap-2.5 text-left disabled:cursor-default">
+                      <span className={`w-8 h-8 rounded-full text-white text-sm font-bold flex items-center justify-center shrink-0 ${current ? "bg-emerald-600" : "bg-slate-400"}`}>{initialOf(a.email)}</span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-slate-800 truncate">{a.email}</span>
+                        <span className={`block text-[11px] ${current ? "text-emerald-700" : !a.refresh_token ? "text-amber-700" : "text-slate-500"}`}>
+                          {current ? "✓ Using now" : switching === a.id ? "Switching…" : !a.refresh_token ? "Signed out — tap to sign in" : "Tap to switch"}
+                        </span>
+                      </span>
+                    </button>
+                    {!current && (
+                      <button type="button" onClick={() => forgetAccount(a.id)} aria-label={`Remove ${a.email} from this device`}
+                        className="px-2 py-1 text-[11px] font-semibold text-slate-400 active:text-red-500">Remove</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {addingAcct ? (
+              <div className="rounded-xl border border-slate-100 p-3 space-y-2.5">
+                <p className="text-sm font-semibold text-slate-700">Add an account</p>
+                <div>
+                  <label className={labelCls}>Email</label>
+                  <input type="email" autoComplete="username" className={inputCls} value={authEmail} onChange={e => setAuthEmail(e.target.value)} placeholder="you@example.com" />
+                </div>
+                <div>
+                  <label className={labelCls}>Password</label>
+                  <input type="password" autoComplete="current-password" className={inputCls} value={authPass} onChange={e => setAuthPass(e.target.value)} placeholder="••••••••"
+                    onKeyDown={e => { if (e.key === "Enter") addAccount(); }} />
+                </div>
+                {authMsg && <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{authMsg}</p>}
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => { setAddingAcct(false); setAuthMsg(""); setAuthPass(""); }}
+                    className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold">Cancel</button>
+                  <button type="button" disabled={authBusy} onClick={addAccount}
+                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-50">{authBusy ? "Signing in…" : "Sign in"}</button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" onClick={() => { setAddingAcct(true); setAuthEmail(""); setAuthPass(""); setAuthMsg(""); }}
+                className="w-full py-2.5 rounded-xl border border-dashed border-slate-200 text-slate-600 text-sm font-semibold active:bg-slate-50">+ Add another account</button>
+            )}
+
+            {queued.length > 0 && (
+              <p className="text-[11px] text-amber-700 leading-relaxed">{queued.length} unsynced entr{queued.length === 1 ? "y stays" : "ies stay"} with {session.user.email} and sync when you switch back to it.</p>
+            )}
+            <button type="button" onClick={signOut} className="w-full py-2.5 rounded-xl text-red-500 text-sm font-semibold active:bg-red-50">Sign out of {session.user.email}</button>
+            <p className="text-[11px] text-slate-400 leading-relaxed">Anyone using this phone can switch to these accounts without a password. On a shared phone, use Remove or Sign out.</p>
           </div>
         </div>
       )}
